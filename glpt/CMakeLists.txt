@@ -1,3 +1,5 @@
+find_package(OpenCL REQUIRED)
+
 set(LIB_NAME
         ${PROJECT_NAME}_lib)
 
@@ -6,7 +8,10 @@ set(BUILD_SRC
 
 set(PUBLIC_LIBS
         imgui
-        glm)
+        glm
+        OpenCL::HeadersCpp
+        OpenCL::Headers
+        OpenCL::OpenCL)
 
 add_library(${LIB_NAME}
         ${BUILD_SRC})
