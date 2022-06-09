@@ -12,30 +12,15 @@
 #    include <GL/glx.h>
 #endif
 
-#if defined(__clang__)
-#    pragma clang diagnostic push
-#    pragma clang diagnostic ignored "-Wunknown-warning-option"
-#    pragma clang diagnostic ignored "-Wdeprecated-volatile"
-#elif defined(__GNUC__) || defined(__GNUG__)
-#    pragma GCC diagnostic push
-#    pragma GCC diagnostic ignored "-Wpragmas"
-#    pragma GCC diagnostic ignored "-Wvolatile"
-#endif
-
-#define GLM_FORCE_SILENT_WARNINGS
-#include <glm/glm.hpp>
-
 #include <iostream>
 #include <vector>
 #include <algorithm>
 
-GLuint                  texture;
-cl::ImageGL             cl_texture;
-cl::Context             context;
-cl::Kernel              kernel;
-cl_int                  error = 0;
-std::vector<cl::Memory> img;
-int                     WIDTH = 256, HEIGHT = 256;
+using user_ptr = struct {
+    int width;
+    int height;
+};
+using user_ptr_t = std::atomic<std::optional<user_ptr>>;
 
 static void
 glfw_error_callback(int err, const char *description) {
@@ -43,57 +28,27 @@ glfw_error_callback(int err, const char *description) {
 }
 
 static void
-glfw_framebuffer_size_callback(GLFWwindow *, int width, int height) {
-    std::cout << "window resized to " << width << " " << height << "\n";
-    WIDTH  = width;
-    HEIGHT = height;
-    glViewport(0, 0, width, height);
-    glDeleteTextures(1, &texture);
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(
-        GL_TEXTURE_2D,    // target
-        0,                // mipmap level
-        GL_RGBA8,         // internal format
-        width,            // width in pixels
-        height,           // height in pixels
-        0,                // border, must be 0
-        GL_RGBA,          // format
-        GL_UNSIGNED_BYTE, // type
-        nullptr           // data
-    );
-    cl_texture = cl::ImageGL(context, CL_MEM_READ_WRITE, GL_TEXTURE_2D, 0, texture, &error);
-    img        = std::vector<cl::Memory>{cl_texture};
-    kernel.setArg(0, cl_texture);
+glfw_framebuffer_size_callback(GLFWwindow *window, int width, int height) {
+    auto &new_window_dim = *(user_ptr_t *)glfwGetWindowUserPointer(window);
+    new_window_dim       = user_ptr{.width = width, .height = height};
 }
 
-int
-main() {
-    // Setup window
-    glfwSetErrorCallback(glfw_error_callback);
-    if (!glfwInit()) return 1;
+static void
+render_loop(GLFWwindow *window, int width, int height, float framerate) {
+    user_ptr_t new_window_dim;
 
-    // Create window with graphics context
-    GLFWwindow *window = glfwCreateWindow(WIDTH, HEIGHT, "GLFW Window", nullptr, nullptr);
-    if (window == nullptr) {
-        return 1;
-    }
-    glfwGetFramebufferSize(window, &WIDTH, &HEIGHT);
     glfwMakeContextCurrent(window);
-    glfwSetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
-    glfwSwapInterval(1); // Enable vsync
+    glfwSetWindowUserPointer(window, &new_window_dim);
+
+    glfwSwapInterval(0);
 
     if (gl3wInit()) {
         fprintf(stderr, "failed to initialize OpenGL\n");
-        return -1;
+        exit(EXIT_FAILURE);
     }
     if (!gl3wIsSupported(3, 2)) {
         fprintf(stderr, "OpenGL 3.2 not supported\n");
-        return -1;
+        exit(EXIT_FAILURE);
     }
 
     GLuint program = glCreateProgram();
@@ -169,6 +124,7 @@ main() {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indexData), indexData, GL_STATIC_DRAW);
 
+    GLuint texture;
     glGenTextures(1, &texture);
 
     glBindTexture(GL_TEXTURE_2D, texture);
@@ -176,19 +132,18 @@ main() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
     glTexImage2D(
         GL_TEXTURE_2D,    // target
         0,                // mipmap level
         GL_RGBA8,         // internal format
-        WIDTH,            // width in pixels
-        HEIGHT,           // height in pixels
+        width,            // width in pixels
+        height,           // height in pixels
         0,                // border, must be 0
         GL_RGBA,          // format
         GL_UNSIGNED_BYTE, // type
         nullptr           // data
     );
-
-    glFinish();
 
     std::vector<cl::Platform> platforms;
     cl::Platform::get(&platforms);
@@ -223,21 +178,31 @@ main() {
         0};
 #endif
 
-    context = cl::Context(device, props);
-    std::string kernel_code =
-        "void kernel my_kernel(__write_only image2d_t output, __read_only uint frame){\n"
-        "    int2 coord = (int2)(get_global_id(0), get_global_id(1));\n"
-        "    int i = coord.x + coord.y * get_image_width(output);\n"
-        "    float3 color = (float3){\n"
-        "        i % 256 / 255.0,\n"
-        "        (i / 256) % 256 / 255.0,\n"
-        "        (i / 256 / 256) % 256 / 255.0\n"
-        "    };\n"
-        "    write_imagef(output, coord, (float4){color, 1.0});\n"
-        "}";
-    auto sources    = cl::Program::Sources{kernel_code};
-    auto cl_program = cl::Program(context, sources);
-    auto queue      = cl::CommandQueue(context, device);
+    auto        context     = cl::Context(device, props);
+    std::string kernel_code = R"(
+void kernel my_kernel(__write_only image2d_t output, __read_only int frame){
+    int2 coord = (int2)(get_global_id(0), get_global_id(1));
+    int i = coord.x + coord.y * get_image_width(output);
+    float3 color = (float3) {
+        ((coord.x >> 4) & 0xFF) / 255.0,
+        (((coord.x & 0xF) << 4) + ((coord.y >> 8) & 0xF) ) / 255.0,
+        (coord.y & 0xFF) / 255.0,
+    };
+    // float3 color = (float3){
+    //     (i / 256 / 256) % 256 / 255.0,
+    //     (i / 256) % 256 / 255.0,
+    //     i % 256 / 255.0,
+    // };
+    // float3 color = (float3){
+    //     i % 2 / 1.0,
+    //     i / 2 % 2 / 1.0,
+    //     i / 4 % 2 / 1.0,
+    // };
+    write_imagef(output, coord, (float4)(color, 1.0));
+})";
+    auto        sources     = cl::Program::Sources{kernel_code};
+    auto        cl_program  = cl::Program(context, sources);
+    auto        queue       = cl::CommandQueue(context, device);
 
     try {
         cl_program.build(device);
@@ -251,6 +216,7 @@ main() {
         exit(EXIT_FAILURE);
     }
 
+    cl::ImageGL cl_texture;
     try {
         cl_texture = cl::ImageGL(context, CL_MEM_READ_WRITE, GL_TEXTURE_2D, 0, texture, nullptr);
     } catch (cl::Error &e) {
@@ -260,19 +226,57 @@ main() {
         exit(EXIT_FAILURE);
     }
 
-    kernel = cl::Kernel(cl_program, "my_kernel");
+    auto kernel = cl::Kernel(cl_program, "my_kernel");
     kernel.setArg(0, cl_texture);
-    img = std::vector<cl::Memory>{cl_texture};
+    auto img   = std::vector<cl::Memory>{cl_texture};
+    int  frame = 0;
 
-    glViewport(0, 0, WIDTH, HEIGHT);
-
-    glm::vec4 clear_color(0.45f, 0.55f, 0.60f, 1.00f);
-    cl_uint   frame_count = 0;
-    auto      prev_time   = glfwGetTime();
+    auto last_time  = glfwGetTime();
+    int  last_frame = 0;
     while (!glfwWindowShouldClose(window)) {
-        frame_count++;
-        glfwPollEvents();
+        auto frame_start = glfwGetTime();
+        frame++;
+        if (new_window_dim.load()) {
+            auto new_dim = new_window_dim.exchange(std::nullopt).value();
 
+            width  = new_dim.width;
+            height = new_dim.height;
+
+            glViewport(0, 0, width, height);
+            glDeleteTextures(1, &texture);
+            glGenTextures(1, &texture);
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(
+                GL_TEXTURE_2D,    // target
+                0,                // mipmap level
+                GL_RGBA8,         // internal format
+                width,            // width in pixels
+                height,           // height in pixels
+                0,                // border, must be 0
+                GL_RGBA,          // format
+                GL_UNSIGNED_BYTE, // type
+                nullptr           // data
+            );
+            cl_texture =
+                cl::ImageGL(context, CL_MEM_READ_WRITE, GL_TEXTURE_2D, 0, texture, nullptr);
+            img = std::vector<cl::Memory>{cl_texture};
+            kernel.setArg(0, cl_texture);
+        }
+
+        // Finish all GL commands before CL tries to acquire the texture
+        glFinish();
+        // Run OpenCL to render to texture
+        kernel.setArg(1, frame);
+        queue.enqueueAcquireGLObjects(&img);
+        queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(width, height));
+        queue.enqueueReleaseGLObjects(&img);
+        queue.finish();
+
+        // Draw texture to the screen
         glClear(GL_COLOR_BUFFER_BIT);
         glUseProgram(program);
         glActiveTexture(GL_TEXTURE0);
@@ -281,23 +285,46 @@ main() {
         glBindVertexArray(vao);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 
-        // glFinish();
-
         glfwSwapBuffers(window);
 
-        kernel.setArg(1, frame_count);
-        queue.enqueueAcquireGLObjects(&img);
-        queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(WIDTH, HEIGHT));
-        queue.finish();
-        queue.enqueueReleaseGLObjects(&img);
+        auto target_time = frame_start + (1.0f / framerate);
+        while (glfwGetTime() < target_time) {
+            // spin until framerate is reached
+        }
 
         auto curr_time = glfwGetTime();
-        if (curr_time - prev_time > 1.0) {
-            std::cout << frame_count / (curr_time - prev_time) << "\t" << error << std::endl;
-            frame_count = 0;
-            prev_time   = curr_time;
+        auto time_diff = curr_time - last_time;
+        if (time_diff > 1.0) {
+            std::cout << (frame - last_frame) / time_diff << std::endl;
+            last_frame = frame;
+            last_time  = curr_time;
         }
     }
+
+    glfwMakeContextCurrent(nullptr);
+}
+
+int
+main() {
+    glfwSetErrorCallback(glfw_error_callback);
+    if (!glfwInit()) return 1;
+
+    int         width = 256, height = 256;
+    GLFWwindow *window = glfwCreateWindow(width, height, "GLFW Window", nullptr, nullptr);
+    if (window == nullptr) {
+        exit(EXIT_FAILURE);
+    }
+    glfwSetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
+    auto render_thread = std::thread(render_loop, window, width, height, 120.0f);
+
+    while (!glfwWindowShouldClose(window)) {
+        glfwWaitEvents();
+    }
+
+    render_thread.join();
+
+    glfwDestroyWindow(window);
+    glfwTerminate();
 
     return 0;
 }
