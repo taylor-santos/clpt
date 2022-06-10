@@ -1,17 +1,19 @@
 find_package(OpenCL REQUIRED)
+find_package(OpenGL REQUIRED)
 
 set(LIB_NAME
         ${PROJECT_NAME}_lib)
 
 set(BUILD_SRC
-        src/glpt.cpp)
+        src/glpt.cpp
+        src/render.cpp)
 
 set(PUBLIC_LIBS
         imgui
         glm
         OpenCL::HeadersCpp
-        OpenCL::Headers
-        OpenCL::OpenCL)
+        OpenCL::OpenCL
+        ${OPENGL_gl_LIBRARY})
 
 add_library(${LIB_NAME}
         ${BUILD_SRC})

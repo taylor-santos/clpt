@@ -8,8 +8,7 @@ add_executable(${PROJECT_NAME}
         main.cpp)
 
 target_link_libraries(${PROJECT_NAME}
-        ${PROJECT_NAME}_lib
-        ${OPENGL_gl_LIBRARY})
+        ${PROJECT_NAME}_lib)
 
 if (MSVC)
     target_compile_options(${PROJECT_NAME}

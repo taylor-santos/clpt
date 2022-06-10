@@ -35,19 +35,6 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(clhpp)
 
 #------------------------------------------------------------------------------------
-# Fetch OpenCL ICD LOADER
-#------------------------------------------------------------------------------------
-
-message(STATUS "Fetching OpenCL ICD Loader...")
-# set(OPENCL_CLHPP_HEADERS_DIR ${OpenCL_INCLUDE_DIRS})
-FetchContent_Declare(
-        clicd
-        GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-ICD-Loader.git
-        GIT_TAG v2022.05.18
-)
-FetchContent_MakeAvailable(clicd)
-
-#------------------------------------------------------------------------------------
 # Fetch gl3w
 #------------------------------------------------------------------------------------
 
