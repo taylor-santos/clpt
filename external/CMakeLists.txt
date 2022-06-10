@@ -1,4 +1,5 @@
 include(FetchContent)
+cmake_policy(SET CMP0077 NEW)
 
 # Don't re-download external dependencies if they are already present
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
@@ -11,7 +12,7 @@ find_package(Python COMPONENTS Interpreter REQUIRED)
 #------------------------------------------------------------------------------------
 
 message(STATUS "Fetching OpenCL Headers...")
-set(OPENCL_HEADERS_BUILD_CXX_TESTS OFF)
+set(OPENCL_HEADERS_BUILD_CXX_TESTS CACHE BOOL OFF)
 FetchContent_Declare(
         clh
         GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-Headers.git
@@ -24,9 +25,8 @@ FetchContent_MakeAvailable(clh)
 #------------------------------------------------------------------------------------
 
 message(STATUS "Fetching OpenCL C++ Bindings...")
-# set(OPENCL_CLHPP_HEADERS_DIR ${OpenCL_INCLUDE_DIRS})
-set(BUILD_DOCS OFF)
-set(BUILD_EXAMPLES OFF)
+set(BUILD_DOCS CACHE BOOL OFF)
+set(BUILD_EXAMPLES CACHE BOOL OFF)
 FetchContent_Declare(
         clhpp
         GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-CLHPP
@@ -53,11 +53,11 @@ if (NOT gl3w_POPULATED)
         message(FATAL_ERROR "could not find gl3w_gen.py")
     endif ()
     execute_process(
-            COMMAND ${PYTHON_EXECUTABLE} ${gl3w_GEN_PY}
+            COMMAND ${Python_EXECUTABLE} ${gl3w_GEN_PY}
             WORKING_DIRECTORY ${gl3w_SOURCE_DIR}
             RESULT_VARIABLE gl3w_GEN_PY_RESULT)
     if (NOT gl3w_GEN_PY_RESULT EQUAL "0")
-        message(FATAL_ERROR "bad exit status from call to gl3w_gen.py")
+        message(FATAL_ERROR "${Python_EXECUTABLE}: bad exit status from call to gl3w_gen.py: ${gl3w_GEN_PY_RESULT}")
     endif ()
     add_library(gl3w)
     target_sources(gl3w PRIVATE
@@ -71,10 +71,10 @@ endif ()
 #------------------------------------------------------------------------------------
 
 message(STATUS "Fetching glfw...")
-set(GLFW_BUILD_EXAMPLES OFF)
-set(GLFW_BUILD_TESTS OFF)
-set(GLFW_BUILD_DOCS OFF)
-set(GLFW_INSTALL OFF)
+set(GLFW_BUILD_EXAMPLES CACHE BOOL OFF)
+set(GLFW_BUILD_TESTS CACHE BOOL OFF)
+set(GLFW_BUILD_DOCS CACHE BOOL OFF)
+set(GLFW_INSTALL CACHE BOOL OFF)
 FetchContent_Declare(
         glfw
         GIT_REPOSITORY https://github.com/glfw/glfw
@@ -99,9 +99,9 @@ FetchContent_MakeAvailable(glm)
 #------------------------------------------------------------------------------------
 
 message(STATUS "Fetching doctest...")
-set(DOCTEST_WITH_TESTS OFF)
-set(DOCTEST_NO_INSTALL ON)
-set(DOCTEST_WITH_MAIN_IN_STATIC_LIB OFF)
+set(DOCTEST_WITH_TESTS CACHE BOOL OFF)
+set(DOCTEST_NO_INSTALL CACHE BOOL ON)
+set(DOCTEST_WITH_MAIN_IN_STATIC_LIB CACHE BOOL OFF)
 FetchContent_Declare(
         doctest
         GIT_REPOSITORY https://github.com/onqtam/doctest

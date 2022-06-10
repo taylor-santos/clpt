@@ -3,11 +3,13 @@
 
 #define NOMINMAX
 #include <GL/gl3w.h>
-#include <CL/opencl.hpp>
 #include <GLFW/glfw3.h> // Will drag system OpenGL headers
 
 #include <iostream>
 #include <algorithm>
+#include <optional>
+#include <functional>
+#include <thread>
 
 #include "render.hpp"
 
@@ -74,41 +76,36 @@ void kernel my_kernel(__write_only image2d_t output, __read_only int frame){
 
     auto last_time  = glfwGetTime();
     int  last_frame = 0;
-    try {
-        while (!glfwWindowShouldClose(window)) {
-            auto frame_start = glfwGetTime();
-            frame++;
-            if (new_window_dim.load()) {
-                auto new_dim = new_window_dim.exchange(std::nullopt).value();
+    while (!glfwWindowShouldClose(window)) {
+        auto frame_start = glfwGetTime();
+        frame++;
+        if (new_window_dim.load()) {
+            auto new_dim = new_window_dim.exchange(std::nullopt).value();
 
-                width  = new_dim.width;
-                height = new_dim.height;
+            width  = new_dim.width;
+            height = new_dim.height;
 
-                renderer.resize(width, height);
-            }
-
-            // Run OpenCL to render to texture
-            renderer.setKernelArg(1, frame);
-            renderer.render();
-
-            glfwSwapBuffers(window);
-
-            auto target_time = frame_start + (1.0f / framerate);
-            while (glfwGetTime() < target_time) {
-                // spin until framerate is reached
-            }
-
-            auto curr_time = glfwGetTime();
-            auto time_diff = curr_time - last_time;
-            if (time_diff > 1.0) {
-                std::cout << (frame - last_frame) / time_diff << std::endl;
-                last_frame = frame;
-                last_time  = curr_time;
-            }
+            renderer.resize(width, height);
         }
-    } catch (cl::Error &e) {
-        std::cerr << "OpenCL Error " << e.err() << std::endl;
-        glfwSetWindowShouldClose(window, 1);
+
+        // Run OpenCL to render to texture
+        renderer.setKernelArg(1, sizeof(frame), &frame);
+        renderer.render();
+
+        glfwSwapBuffers(window);
+
+        auto target_time = frame_start + (1.0f / framerate);
+        while (glfwGetTime() < target_time) {
+            // spin until framerate is reached
+        }
+
+        auto curr_time = glfwGetTime();
+        auto time_diff = curr_time - last_time;
+        if (time_diff > 1.0) {
+            std::cout << (frame - last_frame) / time_diff << std::endl;
+            last_frame = frame;
+            last_time  = curr_time;
+        }
     }
 
     glfwMakeContextCurrent(nullptr);
@@ -125,7 +122,7 @@ main() {
         exit(EXIT_FAILURE);
     }
     glfwSetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
-    auto render_thread = std::thread(render_loop, window, width, height, 120.0f);
+    auto render_thread = std::thread(render_loop, window, width, height, -1.0f);
 
     while (!glfwWindowShouldClose(window)) {
         glfwWaitEvents();

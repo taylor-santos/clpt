@@ -161,7 +161,84 @@ get_cl_image(const cl::Context &context, GLuint texture) {
 
 namespace Render {
 
-Renderer::Renderer(const std::string &source, const char *kernel_name, int width, int height) try
+struct Renderer::Impl {
+    Impl(const std::string &source, const char *kernel_name, int width, int height);
+    ~Impl() = default;
+
+    class SharedTexture {
+    public:
+        SharedTexture(Impl &cl, int width, int height);
+        ~SharedTexture();
+
+        void
+        resize(int width, int height);
+
+        [[nodiscard]] inline const std::vector<cl::Memory> &
+        gl_objects() const {
+            return gl_objects_;
+        }
+
+        [[nodiscard]] inline std::pair<int, int>
+        dims() const {
+            return {width_, height_};
+        }
+
+        [[nodiscard]] inline operator GLuint() const {
+            return gl_texture_;
+        }
+
+    private:
+        int                     width_;
+        int                     height_;
+        Impl                   &renderer_;
+        GLuint                  gl_texture_;
+        cl::ImageGL             cl_texture_;
+        std::vector<cl::Memory> gl_objects_;
+    };
+
+    class GLProgram {
+    public:
+        GLProgram();
+        ~GLProgram();
+
+        [[nodiscard]] inline operator GLuint() const {
+            return program_;
+        }
+
+    private:
+        GLuint program_;
+    };
+
+    class GLvao {
+    public:
+        GLvao();
+        ~GLvao();
+
+        [[nodiscard]] inline operator GLuint() const {
+            return vao_;
+        }
+
+    private:
+        GLuint vao_ = 0;
+        GLuint vbo_ = 0;
+        GLuint ebo_ = 0;
+    };
+
+    cl::Platform     cl_platform_;
+    cl::Device       cl_device_;
+    cl::Context      cl_context_;
+    cl::CommandQueue cl_queue_;
+    cl::Program      cl_program_;
+    cl::Kernel       cl_kernel_;
+
+    GLProgram gl_program_;
+    GLvao     gl_vao_;
+    GLint     gl_tex_loc_;
+
+    SharedTexture texture_;
+};
+
+Renderer::Impl::Impl(const std::string &source, const char *kernel_name, int width, int height)
     : cl_platform_{get_cl_platform()}
     , cl_device_{get_cl_device()}
     , cl_context_{get_cl_context(cl_platform_, cl_device_)}
@@ -170,9 +247,13 @@ Renderer::Renderer(const std::string &source, const char *kernel_name, int width
     , cl_kernel_{get_cl_kernel(cl_program_, kernel_name)}
     , gl_program_()
     , gl_tex_loc_(glGetUniformLocation(gl_program_, "tex"))
-    , texture_(*this, width, height) {
-    // TODO: error check gl_tex_loc_
+    , texture_(*this, width, height) {}
 
+Renderer::Renderer(const std::string &source, const char *kernel_name, int width, int height) try
+    : impl_{std::make_unique<Impl>(source, kernel_name, width, height)}
+    , width_{width}
+    , height_{height} {
+    // TODO: error check gl_tex_loc_
 } catch (cl::BuildError &e) {
     for (auto &line : e.getBuildLog()) {
         std::cerr << line.first.getInfo<CL_DEVICE_NAME>() << ":\n" << line.second << "\n";
@@ -183,53 +264,68 @@ Renderer::Renderer(const std::string &source, const char *kernel_name, int width
     throw;
 }
 
+Renderer::~Renderer() = default;
+
 void
 Renderer::render() const {
-    auto gl_objects      = texture_.gl_objects();
-    auto [width, height] = texture_.dims();
+    auto &gl_objects = impl_->texture_.gl_objects();
 
-    // Finish all GL commands before CL tries to acquire the texture
+    // Finish all GL commands before CL tries to render to the texture
     glFinish();
 
-    cl_queue_.enqueueAcquireGLObjects(&gl_objects);
-    cl_queue_.enqueueNDRangeKernel(cl_kernel_, cl::NullRange, cl::NDRange(width, height));
-    cl_queue_.enqueueReleaseGLObjects(&gl_objects);
-    cl_queue_.finish();
+    // Take ownership of the texture, then run the kernel to render to it
+    impl_->cl_queue_.enqueueAcquireGLObjects(&gl_objects);
+    impl_->cl_queue_.enqueueNDRangeKernel(
+        impl_->cl_kernel_,
+        cl::NullRange,
+        cl::NDRange(width_, height_));
+    // Release ownership of the texture so that GL can
+    impl_->cl_queue_.enqueueReleaseGLObjects(&gl_objects);
+
+    // Finish all CL commands before drawing to the screen
+    impl_->cl_queue_.finish();
 
     // Draw texture to the screen
     glClear(GL_COLOR_BUFFER_BIT);
-    glUseProgram(gl_program_);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texture_);
-    glUniform1i(gl_tex_loc_, 0);
-    glBindVertexArray(gl_vao_);
+    //    glUseProgram(gl_program_);
+    //    glActiveTexture(GL_TEXTURE0);
+    //    glBindTexture(GL_TEXTURE_2D, texture_);
+    //    glUniform1i(gl_tex_loc_, 0);
+    //    glBindVertexArray(gl_vao_);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 }
 
 void
 Renderer::resize(int width, int height) {
-    texture_.resize(width, height);
+    width_  = width;
+    height_ = height;
+    impl_->texture_.resize(width_, height_);
 }
 
-Renderer::SharedTexture::SharedTexture(Renderer &cl, int width, int height) try
+Renderer::Impl::SharedTexture::SharedTexture(Renderer::Impl &cl, int width, int height) try
     : width_{width}
     , height_{height}
     , renderer_{cl}
     , gl_texture_{get_gl_texture(width_, height_)}
     , cl_texture_{get_cl_image(renderer_.cl_context_, gl_texture_)}
     , gl_objects_{cl_texture_} {
-    renderer_.setKernelArg(0, cl_texture_);
+    renderer_.cl_kernel_.setArg(0, cl_texture_);
 } catch (...) {
     std::cerr << "Failed to create GL Texture: ";
     throw;
 }
 
-Renderer::SharedTexture::~SharedTexture() {
+void
+Renderer::setKernelArg(unsigned int index, size_t size, const void *value) {
+    impl_->cl_kernel_.setArg(index, size, value);
+}
+
+Renderer::Impl::SharedTexture::~SharedTexture() {
     glDeleteTextures(1, &gl_texture_);
 }
 
 void
-Renderer::SharedTexture::resize(int width, int height) {
+Renderer::Impl::SharedTexture::resize(int width, int height) {
     width_  = width;
     height_ = height;
 
@@ -239,10 +335,10 @@ Renderer::SharedTexture::resize(int width, int height) {
     gl_texture_ = get_gl_texture(width_, height_);
     cl_texture_ = get_cl_image(renderer_.cl_context_, gl_texture_);
     gl_objects_ = {cl_texture_};
-    renderer_.setKernelArg(0, cl_texture_);
+    renderer_.cl_kernel_.setArg(0, cl_texture_);
 }
 
-Renderer::GLProgram::GLProgram()
+Renderer::Impl::GLProgram::GLProgram()
     : program_{glCreateProgram()} {
     if (!program_) {
         auto err = glGetError();
@@ -280,11 +376,11 @@ Renderer::GLProgram::GLProgram()
     glUseProgram(program_);
 }
 
-Renderer::GLProgram::~GLProgram() {
+Renderer::Impl::GLProgram::~GLProgram() {
     glDeleteProgram(program_);
 }
 
-Renderer::GLvao::GLvao() {
+Renderer::Impl::GLvao::GLvao() {
     glGenVertexArrays(1, &vao_);
     glBindVertexArray(vao_);
 
@@ -326,7 +422,7 @@ Renderer::GLvao::GLvao() {
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(tris), tris, GL_STATIC_DRAW);
 }
 
-Renderer::GLvao::~GLvao() {
+Renderer::Impl::GLvao::~GLvao() {
     glDeleteVertexArrays(1, &vao_);
     glDeleteBuffers(1, &vbo_);
     glDeleteBuffers(1, &ebo_);
