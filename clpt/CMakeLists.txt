@@ -5,12 +5,17 @@ set(LIB_NAME
         ${PROJECT_NAME}_lib)
 
 set(BUILD_SRC
-        src/glpt.cpp
-        src/render.cpp)
+        src/clpt.cpp
+        src/glfwcpp.cpp
+        src/render.cpp
+        src/transform.cpp
+        src/camera.cpp)
 
 set(PUBLIC_LIBS
-        imgui
+        gl3w
+        glfw
         glm
+        imgui
         OpenCL::HeadersCpp
         OpenCL::OpenCL
         ${OPENGL_gl_LIBRARY})

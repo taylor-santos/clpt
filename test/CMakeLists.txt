@@ -5,7 +5,7 @@ set(TEST_NAME
         ${PROJECT_NAME}_tests)
 
 set(TEST_SRC
-        test_glpt.cpp) # Add test_*.cpp sources here
+        test_clpt.cpp) # Add test_*.cpp sources here
 
 add_executable(${TEST_NAME}
         test_main.cpp

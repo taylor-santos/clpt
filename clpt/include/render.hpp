@@ -4,6 +4,10 @@
 
 #pragma once
 
+#include <string>
+#include <memory>
+#include <functional>
+
 namespace cl {
 class CommandQueue;
 class Kernel;
@@ -24,6 +28,12 @@ public:
 
     void
     setKernelArg(unsigned int index, size_t size, const void *value);
+
+    void
+    addInputBuffer(unsigned int index, size_t size);
+
+    void
+    writeBuffer(unsigned int index, size_t size, void *ptr) const;
 
 private:
     struct Impl;

@@ -1,2 +1,3 @@
-# glpt
-OpenGL Path Tracer
+# clpt
+
+OpenCL Path Tracer

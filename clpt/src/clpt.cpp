@@ -2,13 +2,13 @@
 // Created by taylor-santos on 4/16/2022 at 22:44.
 //
 
-#include "glpt.hpp"
+#include "clpt.hpp"
 
-namespace glpt {
+namespace clpt {
 
 int
 foo() {
     return 123;
 }
 
-} // namespace glpt
+} // namespace clpt

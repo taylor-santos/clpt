@@ -20,6 +20,10 @@
 #    include <GL/glx.h>
 #endif
 
+#include <map>
+
+#include "utils.hpp"
+
 static const char *
 gl_error_string(GLenum err) {
     switch (err) {
@@ -233,9 +237,10 @@ struct Renderer::Impl {
 
     GLProgram gl_program_;
     GLvao     gl_vao_;
-    GLint     gl_tex_loc_;
 
     SharedTexture texture_;
+
+    std::map<unsigned int, cl::Buffer> buffers_;
 };
 
 Renderer::Impl::Impl(const std::string &source, const char *kernel_name, int width, int height)
@@ -246,7 +251,6 @@ Renderer::Impl::Impl(const std::string &source, const char *kernel_name, int wid
     , cl_program_{get_cl_program(cl_context_, cl_device_, source)}
     , cl_kernel_{get_cl_kernel(cl_program_, kernel_name)}
     , gl_program_()
-    , gl_tex_loc_(glGetUniformLocation(gl_program_, "tex"))
     , texture_(*this, width, height) {}
 
 Renderer::Renderer(const std::string &source, const char *kernel_name, int width, int height) try
@@ -318,6 +322,25 @@ Renderer::Impl::SharedTexture::SharedTexture(Renderer::Impl &cl, int width, int 
 void
 Renderer::setKernelArg(unsigned int index, size_t size, const void *value) {
     impl_->cl_kernel_.setArg(index, size, value);
+}
+
+void
+Renderer::addInputBuffer(unsigned int index, size_t size) {
+    auto it = overwrite_emplace(
+        impl_->buffers_,
+        index,
+        impl_->cl_context_,
+        CL_MEM_WRITE_ONLY,
+        size,
+        nullptr,
+        nullptr);
+    auto ctx = it->second.getInfo<CL_MEM_CONTEXT>();
+    impl_->cl_kernel_.setArg(index, it->second);
+}
+
+void
+Renderer::writeBuffer(unsigned int index, size_t size, void *ptr) const {
+    impl_->cl_queue_.enqueueWriteBuffer(impl_->buffers_[index], false, 0, size, ptr);
 }
 
 Renderer::Impl::SharedTexture::~SharedTexture() {

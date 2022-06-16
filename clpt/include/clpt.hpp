@@ -4,9 +4,9 @@
 
 #pragma once
 
-namespace glpt {
+namespace clpt {
 
 int
 foo();
 
-} // namespace glpt
+} // namespace clpt
