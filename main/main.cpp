@@ -72,10 +72,10 @@ private:
 
 ThreadSafe<std::optional<std::pair<int, int>>> frame_size;
 ThreadSafe<Camera>                             shared_camera;
-ThreadSafe<bool>                               cursor_locked = true;
+ThreadSafe<bool>                               cursor_locked = false;
 ThreadSafe<glm::vec2>                          shared_velocity;
 ThreadSafe<glm::vec2>                          sensitivity{1, 1};
-ThreadSafe<int>                                input = 40;
+ThreadSafe<int>                                input = 2000;
 
 bool                           fullscreen = false;
 std::tuple<int, int, int, int> windowed_dim;
@@ -126,9 +126,11 @@ render_loop(
     }
 
     shared_camera.modify([](Camera &cam) {
-        cam.transform.setLocalPosition({-0.34766639522035447, 0, 1.9952449076456595});
-        cam.setRotation(glm::degrees(3.87637758f), glm::degrees(0.0f));
-        cam.setFOV(glm::degrees(1.57079637f));
+        cam.transform.setLocalPosition({0, 0, 3});
+        cam.setFOV(glm::degrees(1.0f));
+        // cam.transform.setLocalPosition({-0.34766639522035447, 0, 1.9952449076456595});
+        // cam.setRotation(glm::degrees(3.87637758f), glm::degrees(0.0f));
+        // cam.setFOV(glm::degrees(1.57079637f));
     });
 
     // Setup Dear ImGui context
@@ -146,10 +148,12 @@ render_loop(
     Object objects[] = {
         {
             // Light
-            .type     = BOX,
-            .box      = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f, 0.5f}},
+            //            .type = SPHERE,
+            .type = BOX,
+            .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f, 0.5f}},
+            //            .sphere   = {.center = {1, -0.2f, 0}, .radius = 0.2f},
             .color    = {255, 255, 255},
-            .emission = 5,
+            .emission = 4,
         },
         {
             // Sphere
@@ -240,6 +244,11 @@ render_loop(
         while (!window.should_close()) {
             auto frame_start = GLFW::get_time();
 
+            //            objects[0].sphere.center.y = -0.2f;
+            //            objects[0].sphere.center.x = (cl_float)sin(GLFW::get_time()) / 2;
+            //            objects[0].sphere.center.z = (cl_float)cos(GLFW::get_time()) / 2;
+            //            renderer.writeBuffer(5, sizeof(objects), objects);
+
             frame++;
 
             {
@@ -266,6 +275,7 @@ render_loop(
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
+            ImGui::SetNextWindowPos({0, 0});
             if (ImGui::Begin(
                     "Framerate",
                     nullptr,
@@ -518,8 +528,11 @@ main() try {
             sens *= glm::tan(glm::radians(new_fov) / 2) / glm::tan(glm::radians(old_fov) / 2);
         });
     });
+    /*
     window.set_cursor_input_mode(GLFW::CursorInputMode::CURSOR_DISABLED);
     window.set_cursor_pos(0, 0);
+    cursor_locked = true;
+     */
     if (GLFW::raw_mouse_motion_supported()) {
         window.set_input_mode(GLFW::InputMode::RAW_MOUSE_MOTION, true);
     }

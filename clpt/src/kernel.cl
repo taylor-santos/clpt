@@ -87,7 +87,6 @@ snell(float3 s, float3 n, float n1, float n2) {
     return (n1 * s - n * (n1 * ns + sqrt(n2 * n2 + n1 * n1 * (ns * ns - 1)))) / n2;
 }
 
-/*
 float3
 random_hemisphere(float3 n, tinymt64wp_t *rand, float angle) {
     // A random point on a unit sphere has a uniformly distributed z coordinate
@@ -108,7 +107,8 @@ random_hemisphere(float3 n, tinymt64wp_t *rand, float angle) {
         n.z * z - sqrt(1 - pow(z, 2)) * (n.x * cos(p) + n.y * sin(p))};
     return v;
 }
- */
+
+/*
 float3
 random_hemisphere(float3 n, tinymt64wp_t *rand) {
     float  z = -1 + tinymt64_double01(rand) * 2;
@@ -118,6 +118,7 @@ random_hemisphere(float3 n, tinymt64wp_t *rand) {
     if (dot(d, n) < 0) d = -d;
     return d;
 }
+ */
 
 typedef struct {
     float3 pos;
@@ -154,28 +155,23 @@ FresnelReflectAmount(float n1, float n2, float3 normal, float3 incident, float f
     return mix(f0, f90, ret);
 }
 
-float3
-trace_path(
+bool
+intersect(
     float3                       pos,
     float3                       dir,
-    int                          depth,
-    int                          last_hit_index,
-    tinymt64wp_t                *rand,
+    float                       *t,
+    int                         *id,
+    float3                      *norm,
+    int                          ignore,
     __global __read_only Object *objects,
-    __read_only uint             object_count,
-    bool                         debug) {
-    if (debug) printf("depth %d\n", depth);
-    if (depth <= 0) {
-        return 0;
-    }
-
+    __read_only uint             object_count) {
     bool  did_hit = false;
     float min_t;
     int   hit_index;
     int   hit_side;
 
     for (int i = 0; i < object_count; i++) {
-        if (i == last_hit_index) {
+        if (i == ignore) {
             continue; // Don't re-test the surface we're reflecting off of
         }
 
@@ -201,7 +197,6 @@ trace_path(
                     &t,
                     &side);
                 break;
-            default: printf("Unknown object type %d at index %d\n", objects[i].type, i); return 0;
         }
 
         if (hit && (!did_hit || t < min_t)) {
@@ -212,17 +207,14 @@ trace_path(
         }
     }
     if (!did_hit) {
-        if (debug) printf("No object hit at depth %d\n", depth);
-        return 0;
+        return false;
     }
 
-    if (debug) printf("Hit %d %d\n", hit_index, objects[hit_index].type);
+    if (t) *t = min_t;
+    if (id) *id = hit_index;
 
-    float3 hit_color = convert_float3(objects[hit_index].color) / 255.0;
-
-    float3 emission = 0;
-    if (objects[hit_index].emission > 0) {
-        emission = objects[hit_index].emission * hit_color;
+    if (!norm) {
+        return true;
     }
 
     pos += dir * min_t;
@@ -239,87 +231,20 @@ trace_path(
                 case 4: n = (float3)(0, 0, -1); break;
                 case 5: n = (float3)(0, 0, 1); break;
             }
+            n = dot(n, dir) < 0 ? n : -n;
             break;
     }
-    dir              = random_hemisphere(n, rand);
-    float  p         = 1 / (2 * M_PI);
-    float  cos_theta = dot(dir, n);
-    float3 BRDF      = hit_color / M_PI;
-    return emission +
-           BRDF * cos_theta / p *
-               trace_path(pos, dir, depth - 1, hit_index, rand, objects, object_count, debug);
-    /*
-    bool did_hit = false;
-    int hit_index;
-    int hit_side;
-    float min_t;
 
-    for (int i = 0; i < object_count; i++) {
-        if (debug) printf("Checking %d %d\n", i, objects[i].type);
-        if (last_hit_index != -1 && i == last_hit_index) {
-            continue; // Don't re-test the surface we're reflecting off of
-        }
-        float t;
-        bool hit;
-        int side;
-
-        switch (objects[i].type) {
-            case SPHERE:
-                hit = ray_sphere_intersect(
-                    pos,
-                    dir,
-                    objects[i].sphere.center,
-                    objects[i].sphere.radius,
-                    &t);
-                break;
-            case BOX:
-                hit = ray_box_intersect(
-                    pos,
-                    1 / dir,
-                    objects[i].box.min,
-                    objects[i].box.max,
-                    &t,
-                    &side);
-                break;
-        }
-        if (hit && (!did_hit || t < min_t)) {
-            min_t   = t;
-            did_hit = true;
-            hit_index = i;
-            hit_side = side;
-        }
-    }
-    if (did_hit) {
-        pos += dir * min_t;
-        float3 n;
-        switch (objects[hit_index].type) {
-            case SPHERE:
-                n = normalize(pos - objects[hit_index].sphere.center);
-                break;
-            case BOX:
-                switch(hit_side) {
-                    case 0: n = (float3)(-1,  0,  0); break;
-                    case 1: n = (float3)( 1,  0,  0); break;
-                    case 2: n = (float3)( 0, -1,  0); break;
-                    case 3: n = (float3)( 0,  1,  0); break;
-                    case 4: n = (float3)( 0,  0, -1); break;
-                    case 5: n = (float3)( 0,  0,  1); break;
-                }
-                break;
-        }
-        dir = random_hemisphere(n, rand, M_PI);
-        float p = 1 / (2*M_PI);
-        float cos_theta = dot(dir, n);
-        float3 hit_color = convert_float3(objects[hit_index].color) / 255.0;
-        float3 BRDF = hit_color / M_PI;
-
-        return trace_path(pos, dir, hit_index, depth-1, rand, objects, object_count, debug);
-//        return hit_color * objects[hit_index].emission + (BRDF * incoming * cos_theta / p);
-        // dir -= 2 * dot(dir, n) * n;
-    }
-    return 0;
-     */
+    *norm = n;
+    return true;
 }
+
+typedef struct Hit {
+    float3 color;
+    float3 emission;
+} Hit;
+
+#define MAX_DEPTH 5
 
 void kernel
 my_kernel(
@@ -362,8 +287,8 @@ my_kernel(
     }
      */
 
-    tinymt64wp_t tiny = {0};
-    tinymt64_init(&tiny, seed[coord.x + coord.y * res.x] + noise);
+    tinymt64wp_t rand = {0};
+    tinymt64_init(&rand, seed[coord.x + coord.y * res.x] + noise);
 
     float3 color   = 0;
     int    samples = 0;
@@ -371,8 +296,8 @@ my_kernel(
         float3 pos, dir;
         {
             float2 sample = (float2){
-                (float)coord.x + tinymt64_double01(&tiny),
-                (float)coord.y + tinymt64_double01(&tiny),
+                (float)coord.x + tinymt64_double01(&rand),
+                (float)coord.y + tinymt64_double01(&rand),
             };
             float2 rat = 2 * (sample / convert_float2(res)) - 1;
             float3 fcp = mul(camera, (float3)(rat, 1.0f));
@@ -381,8 +306,62 @@ my_kernel(
             dir = normalize((fcp - pos).xyz);
         }
 
+        Hit hits[MAX_DEPTH];
+        int last_hit_index = -1;
+        int depth;
+        for (depth = 0; depth < MAX_DEPTH; depth++) {
+            float  min_t;
+            int    hit_index;
+            float3 n;
+            if (!intersect(
+                    pos,
+                    dir,
+                    &min_t,
+                    &hit_index,
+                    &n,
+                    last_hit_index,
+                    objects,
+                    object_count)) {
+                break;
+            }
+            last_hit_index   = hit_index;
+            float3 hit_color = convert_float3(objects[hit_index].color) / 255.0;
+
+            hits[depth].color    = hit_color;
+            hits[depth].emission = objects[hit_index].emission * hit_color;
+
+            float p = max(max(hit_color.x, hit_color.y), hit_color.z);
+            if (depth > 3 || !p) {
+                if (tinymt64_double01(&rand) < p) {
+                    hit_color = hit_color * (1 / p);
+                } else {
+                    depth++;
+                    break;
+                }
+            }
+
+            pos += dir * min_t;
+
+            float  r1  = 2 * M_PI * tinymt64_double01(&rand);
+            float  r2  = tinymt64_double01(&rand);
+            float  r2s = sqrt(r2);
+            float3 w   = n;
+            float3 u =
+                normalize(cross(fabs(w.x) > 0.1f ? (float3)(0, 1, 0) : (float3)(1, 0, 0), w));
+            float3 v = cross(w, u);
+            dir      = normalize(u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrt(1 - r2));
+        }
+
+        depth--;
+        float3 new_color = hits[depth].emission * hits[depth].color;
+        for (depth--; depth >= 0; depth--) {
+            new_color *= hits[depth].color;
+            new_color += hits[depth].emission;
+        }
+        color += new_color;
+
         /*
-        double hue = tinymt64_double01(&tiny);
+        double hue = tinymt64_double01(&rand);
 
         float3 ray_color = 1;
 
@@ -497,7 +476,7 @@ my_kernel(
             do {
                 float3 rand_n = n;
                 float prob = FresnelReflectAmount(n1, n2, rand_n, dir, 0, 1);
-                bool is_reflection = tinymt64_double01(&tiny) <= prob;
+                bool is_reflection = tinymt64_double01(&rand) <= prob;
                 if (is_reflection) {
                     dir -= 2 * dot(dir, rand_n) * rand_n;
                 } else {
@@ -556,13 +535,13 @@ my_kernel(
             color += ray_color;
         }
          */
-        color += trace_path(pos, dir, 4, -1, &tiny, objects, object_count, debug);
+        //        color += trace_path(pos, dir, 0, -1, &rand, objects, object_count, 1, debug);
         samples++;
     } while (samples < input);
     color /= samples;
     if (debug) {
         //        printf("]\n");
-        color = 1 - color;
+        color = (float3)(1, 0, 0);
     }
     write_imagef(output, coord, (float4)(color, 1.0f));
 }
