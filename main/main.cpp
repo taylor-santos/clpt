@@ -1,9 +1,10 @@
 #define CL_HPP_ENABLE_EXCEPTIONS
-#define CL_HPP_TARGET_OPENCL_VERSION 200
+#define CL_HPP_TARGET_OPENCL_VERSION 300
 
 #include "glfwcpp.hpp"
 #include "render.hpp"
 #include "camera.hpp"
+#include "cl_struct.h"
 
 #include <optional>
 #include <atomic>
@@ -14,76 +15,17 @@
 #include <thread>
 #include <mutex>
 #include <shared_mutex>
+#include <random>
 
 #define NOMINMAX
 #include <GL/gl3w.h>
+#include <fstream>
 
 #include "glm/gtc/type_ptr.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
-
-static const char *kernel_code = R"(
-float3
-mul(float4 *M, float3 X) {
-    return (float3){
-        dot(M[0].xyz, X) + M[0].w,
-        dot(M[1].xyz, X) + M[1].w,
-        dot(M[2].xyz, X) + M[2].w,
-    } / (dot(M[3].xyz, X) + M[3].w);
-}
-
-bool
-ray_sphere_intersect(float3 origin, float3 dir, float3 center, float radius, float *t) {
-    float3 m = origin - center;
-    float b = dot(m, dir);
-    float c = dot(m, m) - radius * radius;
-    if (c > 0.0f && b > 0.0f) return false;
-    float d = b*b - c;
-
-    if (d < 0.0f) return false;
-
-    *t = -b - sqrt(d);
-    // if (*t < 0.0f) *t = 0.0f;
-    return true;
-}
-
-void
-kernel my_kernel(
-        __write_only image2d_t output,
-        __global __read_only float4 *camera
-){
-    int2 coord = (int2)(get_global_id(0), get_global_id(1));
-    int2 res   = get_image_dim(output);
-
-    float2 ratio = 2*(convert_float2(coord) / convert_float2(res)) - 1;
-    float3 pos = (float3) {
-        camera[0].z,
-        camera[1].z,
-        camera[2].z
-    } / camera[3].z;
-    float3 fcp = mul(camera, (float3)(ratio,  1.0f));
-    float3 dir = normalize((fcp - pos).xyz);
-    float3 color = 1.0f;
-    float t;
-    float3 center = (float3)0.0f;
-    if (ray_sphere_intersect(pos, dir, center, 1.0f, &t)) {
-        float3 h = pos + dir * t;
-        float3 n = normalize(h - center);
-        dir -= 2*dot(dir, n)*n;
-        color *= (float3)(1, 0, 0);
-    }
-    color *= (dir + 1) / 2;
-
-    float a = atan2(dir.z, dir.x) + M_PI;
-    float b = atan2(dir.y, sqrt(dir.x * dir.x + dir.z * dir.z)) + M_PI;
-    if (fmod(a, (float)M_PI/20.0f) < 0.01f || fmod(b, (float)M_PI/20.0f) < 0.01f) {
-        color = 0;
-    }
-    write_imagef(output, coord, (float4)(color, 1.0f));
-}
-)";
 
 template<typename T>
 class ThreadSafe {
@@ -94,8 +36,15 @@ public:
         : val_{val} {}
 
     template<typename... Args>
-    ThreadSafe(Args &&...args)
+    explicit ThreadSafe(Args &&...args)
         : val_(std::forward<Args>(args)...) {}
+
+    ThreadSafe &
+    operator=(const T &other) {
+        std::unique_lock read_lock(read_);
+        val_ = other;
+        return *this;
+    }
 
     [[nodiscard]] T
     get() const {
@@ -126,6 +75,10 @@ ThreadSafe<Camera>                             shared_camera;
 ThreadSafe<bool>                               cursor_locked = true;
 ThreadSafe<glm::vec2>                          shared_velocity;
 ThreadSafe<glm::vec2>                          sensitivity{1, 1};
+ThreadSafe<int>                                input = 40;
+
+bool                           fullscreen = false;
+std::tuple<int, int, int, int> windowed_dim;
 
 [[maybe_unused]] static void
 physics_loop(const GLFW::Window &window, int) {
@@ -146,10 +99,10 @@ physics_loop(const GLFW::Window &window, int) {
             });
         }
 
-        auto target_time = frame_start + (1.0 / 30.0);
-        while (GLFW::get_time() < target_time) {
-            // spin until framerate is reached
-        }
+        // auto target_time = frame_start + (1.0 / 30.0);
+        // while (GLFW::get_time() < target_time) {
+        //     // spin until framerate is reached
+        // }
     }
 }
 
@@ -161,7 +114,6 @@ render_loop(
     int                 height,
     int                 refresh_rate) {
     window.make_context_current();
-
     GLFW::set_swap_interval(0);
 
     if (gl3wInit()) {
@@ -172,6 +124,12 @@ render_loop(
         fprintf(stderr, "OpenGL 3.2 not supported\n");
         exit(EXIT_FAILURE);
     }
+
+    shared_camera.modify([](Camera &cam) {
+        cam.transform.setLocalPosition({-0.34766639522035447, 0, 1.9952449076456595});
+        cam.setRotation(glm::degrees(3.87637758f), glm::degrees(0.0f));
+        cam.setFOV(glm::degrees(1.57079637f));
+    });
 
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
@@ -185,9 +143,90 @@ render_loop(
     ImGui_ImplGlfw_InitForOpenGL(window(), true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
+    Object objects[] = {
+        {
+            // Light
+            .type     = BOX,
+            .box      = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f, 0.5f}},
+            .color    = {255, 255, 255},
+            .emission = 5,
+        },
+        {
+            // Sphere
+            .type     = SPHERE,
+            .sphere   = {.center = {0, -0.7f, 0}, .radius = 0.3f},
+            .color    = {255, 255, 255},
+            .emission = 0,
+        },
+        {
+            // Floor
+            .type     = BOX,
+            .box      = {.min = {-1, -1.05f, -1}, .max = {1, -1, 1}},
+            .color    = {200, 200, 200},
+            .emission = 0,
+        },
+        {
+            // Left Wall
+            .type     = BOX,
+            .box      = {.min = {-1.05f, -1, -1}, .max = {-1, 1, 1}},
+            .color    = {255, 100, 100},
+            .emission = 0,
+        },
+        {
+            // Back Wall
+            .type     = BOX,
+            .box      = {.min = {-1, -1, -1.05f}, .max = {1, 1, -1}},
+            .color    = {200, 200, 200},
+            .emission = 0,
+        },
+        {
+            // Right Wall
+            .type     = BOX,
+            .box      = {.min = {1, -1, -1}, .max = {1.05f, 1, 1}},
+            .color    = {100, 255, 100},
+            .emission = 0,
+        },
+        {
+            // Ceiling
+            .type     = BOX,
+            .box      = {.min = {-1, 1.05f, -1}, .max = {1, 1, 1}},
+            .color    = {200, 200, 200},
+            .emission = 0,
+        },
+    };
+
+    std::string kernel_code;
+    {
+        auto file = std::ifstream("clpt/src/kernel.cl");
+        file.exceptions(std::ifstream::failbit);
+        auto ss = std::stringstream();
+        ss << file.rdbuf();
+        kernel_code = ss.str();
+    }
+
     auto renderer = Render::Renderer(kernel_code, "my_kernel", width, height);
 
     renderer.addInputBuffer(1, 16 * sizeof(float));
+    renderer.addInputBuffer(2, width * height * sizeof(unsigned long long));
+
+    auto r   = std::random_device();
+    auto gen = std::mt19937_64(r());
+    auto dis = std::uniform_int_distribution<unsigned long long>();
+    {
+        std::vector<unsigned long long> seed;
+        seed.reserve(width * height);
+        for (int i = 0; i < width * height; i++) {
+            seed.push_back(dis(gen));
+        }
+        renderer.writeBuffer(2, width * height * sizeof(unsigned long long), seed.data());
+    }
+
+    renderer.addInputBuffer(5, sizeof(objects));
+    renderer.writeBuffer(5, sizeof(objects), objects);
+    {
+        unsigned int val = sizeof(objects) / sizeof(*objects);
+        renderer.setKernelArg(6, sizeof(val), &val);
+    }
 
     int frame = 0;
 
@@ -200,6 +239,7 @@ render_loop(
     try {
         while (!window.should_close()) {
             auto frame_start = GLFW::get_time();
+
             frame++;
 
             {
@@ -209,6 +249,14 @@ render_loop(
                 auto cam_data = glm::value_ptr(cam_mat);
 
                 renderer.writeBuffer(1, 16 * sizeof(float), cam_data);
+            }
+            {
+                int arg = input;
+                renderer.setKernelArg(3, sizeof(int), &arg);
+            }
+            {
+                auto arg = dis(gen);
+                renderer.setKernelArg(4, sizeof(arg), &arg);
             }
 
             //  Render the frame with OpenCL then draw it
@@ -247,13 +295,6 @@ render_loop(
 
             window.swap_buffers();
 
-            if (fps_limit) {
-                auto target_time = frame_start + (1.0 / framerate);
-                while (GLFW::get_time() < target_time) {
-                    // spin until framerate is reached
-                }
-            }
-
             auto curr_time = GLFW::get_time();
             auto time_diff = curr_time - last_time;
             if (time_diff > 0.05) {
@@ -276,6 +317,31 @@ render_loop(
                     height = h;
                 });
                 renderer.resize(width, height);
+                {
+                    renderer.addInputBuffer(2, width * height * sizeof(unsigned long long));
+
+                    std::vector<unsigned long long> seed;
+                    seed.reserve(width * height);
+                    for (int i = 0; i < width * height; i++) {
+                        seed.push_back(dis(gen));
+                    }
+                    renderer.writeBuffer(
+                        2,
+                        width * height * sizeof(unsigned long long),
+                        seed.data());
+                }
+            }
+            //            if (GLFW::get_time() - frame_start > 1.0 / framerate) {
+            //                missed_frames++;
+            //                std::cout << missed_frames << " / " << frame << " = "
+            //                          << (double)missed_frames / frame << std::endl;
+            //            }
+
+            if (fps_limit) {
+                auto target_time = frame_start + (1.0 / framerate);
+                while (GLFW::get_time() < target_time) {
+                    // spin until framerate is reached
+                }
             }
         }
     } catch (std::exception &e) {
@@ -317,13 +383,12 @@ main() try {
 
     int width = 1280, height = 720;
 
-    auto monitor = GLFW::Monitor::get_primary();
+    auto monitor    = GLFW::Monitor::get_primary();
+    auto video_mode = monitor.get_video_mode();
 
     auto window = GLFW::Window(width, height, "GLFW Window");
 
-    window.set_framebuffer_size_callback([&](int w, int h) {
-        frame_size.modify([&](auto &frame) { frame = {w, h}; });
-    });
+    window.set_framebuffer_size_callback([&](int w, int h) { frame_size = std::make_pair(w, h); });
 
     window.set_cursor_pos_callback([&](double x, double y) {
         if (cursor_locked) {
@@ -340,59 +405,117 @@ main() try {
         if (!io.WantCaptureMouse) {
             if (!cursor_locked) {
                 if (action == Action::PRESS) {
-                    cursor_locked.modify([](bool &b) { b = true; });
+                    cursor_locked = true;
                     window.set_cursor_input_mode(CursorInputMode::CURSOR_DISABLED);
                     window.set_cursor_pos(0, 0);
                 }
             }
         }
     });
-    window.set_key_callback([&](GLFW::Key key, int, GLFW::Action action, GLFW::Modifier) {
-        using namespace GLFW;
-        if (cursor_locked) {
-            if (key == Key::KEY_ESCAPE && action == Action::PRESS) {
-                auto [w, h] = window.get_framebuffer_size();
-                cursor_locked.modify([](bool &b) { b = false; });
-                window.set_cursor_input_mode(CursorInputMode::CURSOR_NORMAL);
+
+    window.set_key_callback(
+        GLFW::Key::KEY_ESCAPE,
+        true,
+        [&](GLFW::Key, int, GLFW::Action action, GLFW::Modifier) {
+            if (cursor_locked && action == GLFW::Action::PRESS) {
+                auto [w, h]   = window.get_framebuffer_size();
+                cursor_locked = false;
+                window.set_cursor_input_mode(GLFW::CursorInputMode::CURSOR_NORMAL);
                 window.set_cursor_pos((float)w / 2, (float)h / 2);
             }
-            shared_velocity.modify([&](auto &velocity) {
-                if (key == Key::KEY_W) {
-                    switch (action) {
-                        case Action::PRESS: velocity.y++; break;
-                        case Action::RELEASE: velocity.y--; break;
-                        default: break;
-                    }
-                } else if (key == Key::KEY_D) {
-                    switch (action) {
-                        case Action::PRESS: velocity.x++; break;
-                        case Action::RELEASE: velocity.x--; break;
-                        default: break;
-                    }
-                } else if (key == Key::KEY_S) {
-                    switch (action) {
-                        case Action::PRESS: velocity.y--; break;
-                        case Action::RELEASE: velocity.y++; break;
-                        default: break;
-                    }
-                } else if (key == Key::KEY_A) {
-                    switch (action) {
-                        case Action::PRESS: velocity.x--; break;
-                        case Action::RELEASE: velocity.x++; break;
-                        default: break;
-                    }
+        });
+
+    window.set_key_callback(
+        GLFW::Key::KEY_W,
+        true,
+        [&](GLFW::Key, int, GLFW::Action action, GLFW::Modifier) {
+            if (action == GLFW::Action::PRESS) {
+                shared_velocity.modify([](auto &vel) { vel.y++; });
+            } else if (action == GLFW::Action::RELEASE) {
+                shared_velocity.modify([](auto &vel) { vel.y--; });
+            }
+        });
+    window.set_key_callback(
+        GLFW::Key::KEY_S,
+        true,
+        [&](GLFW::Key, int, GLFW::Action action, GLFW::Modifier) {
+            if (action == GLFW::Action::PRESS) {
+                shared_velocity.modify([](auto &vel) { vel.y--; });
+            } else if (action == GLFW::Action::RELEASE) {
+                shared_velocity.modify([](auto &vel) { vel.y++; });
+            }
+        });
+    window.set_key_callback(
+        GLFW::Key::KEY_D,
+        true,
+        [&](GLFW::Key, int, GLFW::Action action, GLFW::Modifier) {
+            if (action == GLFW::Action::PRESS) {
+                shared_velocity.modify([](auto &vel) { vel.x++; });
+            } else if (action == GLFW::Action::RELEASE) {
+                shared_velocity.modify([](auto &vel) { vel.x--; });
+            }
+        });
+    window.set_key_callback(
+        GLFW::Key::KEY_A,
+        true,
+        [&](GLFW::Key, int, GLFW::Action action, GLFW::Modifier) {
+            if (action == GLFW::Action::PRESS) {
+                shared_velocity.modify([](auto &vel) { vel.x--; });
+            } else if (action == GLFW::Action::RELEASE) {
+                shared_velocity.modify([](auto &vel) { vel.x++; });
+            }
+        });
+
+    window.set_key_callback(
+        GLFW::Key::KEY_F,
+        true,
+        [&](GLFW::Key, int, GLFW::Action action, GLFW::Modifier) {
+            if (action == GLFW::Action::PRESS) {
+                if (fullscreen) {
+                    auto [x, y, w, h] = windowed_dim;
+                    window.set_windowed(x, y, w, h);
+                } else {
+                    windowed_dim = std::tuple_cat(window.get_pos(), window.get_size());
+                    window.set_monitor(
+                        monitor,
+                        video_mode.width,
+                        video_mode.height,
+                        video_mode.refresh_rate);
                 }
-            });
-        }
-    });
+                fullscreen = !fullscreen;
+            }
+        });
+
+    window.set_key_callback(
+        GLFW::Key::KEY_Q,
+        true,
+        [&](GLFW::Key, int, GLFW::Action action, GLFW::Modifier) {
+            if (action == GLFW::Action::PRESS) {
+                input.modify([](int &val) { val--; });
+            }
+        });
+    window.set_key_callback(
+        GLFW::Key::KEY_E,
+        true,
+        [&](GLFW::Key, int, GLFW::Action action, GLFW::Modifier) {
+            if (action == GLFW::Action::PRESS) {
+                input.modify([](int &val) { val++; });
+            }
+        });
+
     window.set_scroll_callback([&](double, double y) {
+        float old_fov, new_fov;
         shared_camera.modify([&](auto &camera) {
-            auto fov     = camera.getFOV() / 180.0f;
-            fov          = -fov / (fov - 1);
-            auto factor  = pow(0.9f, static_cast<float>(y));
-            auto new_fov = fov * factor;
-            new_fov      = new_fov / (new_fov + 1);
-            camera.setFOV(new_fov * 180.0f);
+            old_fov     = camera.getFOV();
+            auto factor = old_fov / 180.0f;
+            factor      = -factor / (factor - 1);
+            new_fov     = factor * pow(0.9f, static_cast<float>(y));
+            new_fov     = new_fov / (new_fov + 1);
+            new_fov *= 180.0f;
+            camera.setFOV(new_fov);
+        });
+        sensitivity.modify([&](glm::vec2 &sens) {
+            sens *= glm::tan(glm::radians(new_fov) / 2) / glm::tan(glm::radians(old_fov) / 2);
         });
     });
     window.set_cursor_input_mode(GLFW::CursorInputMode::CURSOR_DISABLED);
@@ -400,8 +523,6 @@ main() try {
     if (GLFW::raw_mouse_motion_supported()) {
         window.set_input_mode(GLFW::InputMode::RAW_MOUSE_MOTION, true);
     }
-
-    auto video_mode = monitor.get_video_mode();
 
     shared_camera.modify([](auto &camera) { camera.transform.setPosition({0, 0, 5}); });
 

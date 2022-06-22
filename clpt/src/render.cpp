@@ -110,7 +110,10 @@ static cl::Program
 get_cl_program(const cl::Context &context, const cl::Device &device, const std::string &source) {
     try {
         auto program = cl::Program{context, source};
-        program.build(device);
+        program.build(
+            device,
+            "-I clpt/include -cl-fast-relaxed-math -Werror -cl-mad-enable -cl-no-signed-zeros "
+            "-cl-single-precision-constant");
         return program;
     } catch (...) {
         std::cerr << "Failed to build CL Program: ";
@@ -157,8 +160,8 @@ static cl::ImageGL
 get_cl_image(const cl::Context &context, GLuint texture) {
     try {
         return {context, CL_MEM_READ_WRITE, GL_TEXTURE_2D, 0, texture, nullptr};
-    } catch (...) {
-        std::cerr << "Failed to create CL image from GL texture: ";
+    } catch (cl::Error &e) {
+        std::cerr << "Failed to create CL image from GL texture: " << e.what();
         throw;
     }
 }
@@ -257,7 +260,6 @@ Renderer::Renderer(const std::string &source, const char *kernel_name, int width
     : impl_{std::make_unique<Impl>(source, kernel_name, width, height)}
     , width_{width}
     , height_{height} {
-    // TODO: error check gl_tex_loc_
 } catch (cl::BuildError &e) {
     for (auto &line : e.getBuildLog()) {
         std::cerr << line.first.getInfo<CL_DEVICE_NAME>() << ":\n" << line.second << "\n";
@@ -274,7 +276,7 @@ void
 Renderer::render() const {
     auto &gl_objects = impl_->texture_.gl_objects();
 
-    // Finish all GL commands before CL tries to render to the texture
+    // Finish all GL commands before CL renders the next frame
     glFinish();
 
     // Take ownership of the texture, then run the kernel to render to it
@@ -291,11 +293,6 @@ Renderer::render() const {
 
     // Draw texture to the screen
     glClear(GL_COLOR_BUFFER_BIT);
-    //    glUseProgram(gl_program_);
-    //    glActiveTexture(GL_TEXTURE0);
-    //    glBindTexture(GL_TEXTURE_2D, texture_);
-    //    glUniform1i(gl_tex_loc_, 0);
-    //    glBindVertexArray(gl_vao_);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 }
 
@@ -349,6 +346,7 @@ Renderer::Impl::SharedTexture::~SharedTexture() {
 
 void
 Renderer::Impl::SharedTexture::resize(int width, int height) {
+    if (width <= 0 || height <= 0) return;
     width_  = width;
     height_ = height;
 

@@ -23,6 +23,3 @@ overwrite_emplace(std::map<Key, Value> &map, const Key &key, Args &&...args) {
     // Finally, construct the new element in-place in the map, given the hint.
     return map.try_emplace(hint, key, args...);
 }
-
-void
-foo();

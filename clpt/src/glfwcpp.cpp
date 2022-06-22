@@ -4,7 +4,7 @@
 
 #include <GLFW/glfw3.h>
 #include <stdexcept>
-#include <iostream> //nocheckin
+#include <iostream>
 
 #include "glfwcpp.hpp"
 
@@ -77,7 +77,7 @@ Monitor::get_primary() {
     return glfwGetPrimaryMonitor();
 }
 
-std::pair<int, int>
+std::tuple<int, int>
 Monitor::get_pos() const {
     MAIN_THREAD_ONLY();
     int x, y;
@@ -93,7 +93,7 @@ Monitor::get_workarea() const {
     return {x, y, w, h};
 }
 
-std::pair<int, int>
+std::tuple<int, int>
 Monitor::get_physical_size() const {
     MAIN_THREAD_ONLY();
     int w, h;
@@ -101,7 +101,7 @@ Monitor::get_physical_size() const {
     return {w, h};
 }
 
-std::pair<float, float>
+std::tuple<float, float>
 Monitor::get_content_scale() const {
     MAIN_THREAD_ONLY();
     float x, y;
@@ -183,14 +183,34 @@ Monitor::operator()() const {
     return monitor_;
 }
 
+Cursor::Cursor(Image &&image, int xhot, int yhot) {
+    MAIN_THREAD_ONLY();
+    auto img = GLFWimage{image.width, image.height, image.pixels.data()};
+    cursor_  = glfwCreateCursor(&img, xhot, yhot);
+}
+
+Cursor::Cursor(CursorShape shape) {
+    MAIN_THREAD_ONLY();
+    cursor_ = glfwCreateStandardCursor(static_cast<int>(shape));
+}
+
+Cursor::~Cursor() {
+    glfwDestroyCursor(cursor_);
+}
+
+GLFWcursor *
+Cursor::operator()() const {
+    return cursor_;
+}
+
 void
-Window::hint_(int hint, int value) {
+Window::hint(int hint, int value) {
     MAIN_THREAD_ONLY();
     glfwWindowHint(static_cast<int>(hint), value);
 }
 
 void
-Window::hint_(int hint, const std::string &str) {
+Window::hint(int hint, const std::string &str) {
     MAIN_THREAD_ONLY();
     glfwWindowHintString(static_cast<int>(hint), str.c_str());
 }
@@ -217,20 +237,10 @@ Window::clear_current_context() {
     }
 }
 
-Window::Window(int width, int height, const char *title, GLFWmonitor *monitor, GLFWwindow *share)
-    : window_{glfwCreateWindow(width, height, title, monitor, share)} {
-    if (!window_) {
-        const char *msg;
-        int         error = glfwGetError(&msg);
-        throw Error(error, msg);
-    }
-    if (!main_thread || std::this_thread::get_id() != main_thread) {
-        glfwDestroyWindow(window_);
-        using namespace std::string_literals;
-        throw std::logic_error(
-            "GLFW error: tried calling "s + __FUNCTION__ + " from a non-main thread!");
-    }
-    std::cout << "Creating window " << window_ << std::endl;
+Window::Window(int width, int height, const char *title, GLFWmonitor *monitor, GLFWwindow *share) {
+    MAIN_THREAD_ONLY();
+    window_ = glfwCreateWindow(width, height, title, monitor, share);
+
     glfwSetWindowUserPointer(window_, this);
 
     glfwSetWindowPosCallback(window_, [](auto *wptr, int x, int y) {
@@ -292,6 +302,20 @@ Window::Window(int width, int height, const char *title, GLFWmonitor *monitor, G
     });
     glfwSetKeyCallback(window_, [](auto *wptr, int key, int scancode, int action, int mods) {
         auto *window = static_cast<Window *>(glfwGetWindowUserPointer(wptr));
+
+        auto opt = window->key_map_[key];
+        if (opt) {
+            opt->first(
+                static_cast<Key>(key),
+                scancode,
+                static_cast<Action>(action),
+                static_cast<Modifier>(mods));
+            if (opt->second) {
+                // Exclusive flag is set, return early
+                return;
+            }
+        }
+
         if (window->key_fun_)
             window->key_fun_(
                 static_cast<Key>(key),
@@ -320,28 +344,25 @@ Window::Window(int width, int height, const char *title, Monitor *monitor, Windo
 Window::Window(Window &&other) noexcept
     : window_{std::exchange(other.window_, nullptr)}
     , current_thread_{std::exchange(other.current_thread_, {})}
-    , pos_fun_{other.pos_fun_}
-    , size_fun_{other.size_fun_}
-    , close_fun_{other.close_fun_}
-    , refresh_fun_{other.refresh_fun_}
-    , focus_fun_{other.focus_fun_}
-    , iconify_fun_{other.iconify_fun_}
-    , maximize_fun_{other.maximize_fun_}
-    , framebuffer_size_fun_{other.framebuffer_size_fun_}
-    , content_scale_fun_{other.content_scale_fun_}
-    , mouse_button_fun_{other.mouse_button_fun_}
-    , cursor_pos_fun_{other.cursor_pos_fun_}
-    , cursor_enter_fun_{other.cursor_enter_fun_}
-    , scroll_fun_{other.scroll_fun_}
-    , key_fun_{other.key_fun_}
-    , char_fun_{other.char_fun_}
-    , drop_fun_{other.drop_fun_} {
-    std::cout << "Moving window " << window_ << std::endl;
-}
+    , pos_fun_{std::move(other.pos_fun_)}
+    , size_fun_{std::move(other.size_fun_)}
+    , close_fun_{std::move(other.close_fun_)}
+    , refresh_fun_{std::move(other.refresh_fun_)}
+    , focus_fun_{std::move(other.focus_fun_)}
+    , iconify_fun_{std::move(other.iconify_fun_)}
+    , maximize_fun_{std::move(other.maximize_fun_)}
+    , framebuffer_size_fun_{std::move(other.framebuffer_size_fun_)}
+    , content_scale_fun_{std::move(other.content_scale_fun_)}
+    , mouse_button_fun_{std::move(other.mouse_button_fun_)}
+    , cursor_pos_fun_{std::move(other.cursor_pos_fun_)}
+    , cursor_enter_fun_{std::move(other.cursor_enter_fun_)}
+    , scroll_fun_{std::move(other.scroll_fun_)}
+    , key_fun_{std::move(other.key_fun_)}
+    , char_fun_{std::move(other.char_fun_)}
+    , drop_fun_{std::move(other.drop_fun_)} {}
 
 Window &
 Window::operator=(Window &&other) noexcept {
-    std::cout << "Move assigning window " << other.window_ << " to " << window_ << std::endl;
     std::swap(window_, other.window_);
     std::swap(current_thread_, other.current_thread_);
 
@@ -367,15 +388,12 @@ Window::operator=(Window &&other) noexcept {
 
 Window::~Window() {
     if (window_) {
-        std::cout << "Destroying window " << window_ << std::endl;
         if (current_thread_ && std::this_thread::get_id() != current_thread_) {
             std::cerr
                 << "Window is being destroyed while its context is current in a different thread"
                 << std::endl;
         }
         glfwDestroyWindow(window_);
-    } else {
-        std::cout << "Skipping destruction of empty window" << std::endl;
     }
 }
 
@@ -407,13 +425,21 @@ Window::set_title(const std::string &title) const {
 }
 
 void
-Window::set_icon(const std::vector<void *> &images) const {
+Window::set_icon(std::vector<Image> &&images) const {
     MAIN_THREAD_ONLY();
-    (void)images;
-    throw std::logic_error(std::string(__FUNCTION__) + " unimplemented");
+    std::vector<GLFWimage> imgs;
+    imgs.reserve(images.size());
+    std::transform(
+        images.begin(),
+        images.end(),
+        std::back_inserter(imgs),
+        [](Image &image) -> GLFWimage {
+            return {image.width, image.height, image.pixels.data()};
+        });
+    glfwSetWindowIcon(window_, static_cast<int>(imgs.size()), imgs.data());
 }
 
-std::pair<int, int>
+std::tuple<int, int>
 Window::get_pos() const {
     MAIN_THREAD_ONLY();
     int x, y;
@@ -427,7 +453,7 @@ Window::set_pos(int x, int y) const {
     glfwSetWindowPos(window_, x, y);
 }
 
-std::pair<int, int>
+std::tuple<int, int>
 Window::get_size() const {
     MAIN_THREAD_ONLY();
     int x, y;
@@ -453,7 +479,7 @@ Window::set_size(int x, int y) const {
     glfwSetWindowSize(window_, x, y);
 }
 
-std::pair<int, int>
+std::tuple<int, int>
 Window::get_framebuffer_size() const {
     MAIN_THREAD_ONLY();
     int w, h;
@@ -469,7 +495,7 @@ Window::get_frame_size() const {
     return {left, top, right, bottom};
 }
 
-std::pair<float, float>
+std::tuple<float, float>
 Window::get_content_scale() const {
     MAIN_THREAD_ONLY();
     float x, y;
@@ -562,98 +588,91 @@ Window::set_attribute(Attribute attrib, int value) const {
 }
 
 Window::PosFun
-Window::set_position_callback(PosFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_position_callback(const PosFun &callback) {
     return std::exchange(pos_fun_, callback);
 }
 
 Window::SizeFun
-Window::set_size_callback(SizeFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_size_callback(const SizeFun &callback) {
     return std::exchange(size_fun_, callback);
 }
 
 Window::CloseFun
-Window::set_close_callback(CloseFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_close_callback(const CloseFun &callback) {
     return std::exchange(close_fun_, callback);
 }
 
 Window::RefreshFun
-Window::set_refresh_callback(RefreshFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_refresh_callback(const RefreshFun &callback) {
     return std::exchange(refresh_fun_, callback);
 }
 
 Window::FocusFun
-Window::set_focus_callback(FocusFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_focus_callback(const FocusFun &callback) {
     return std::exchange(focus_fun_, callback);
 }
 
 Window::IconifyFun
-Window::set_iconfiy_callback(IconifyFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_iconfiy_callback(const IconifyFun &callback) {
     return std::exchange(iconify_fun_, callback);
 }
 
 Window::MaximizeFun
-Window::set_maximize_callback(MaximizeFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_maximize_callback(const MaximizeFun &callback) {
     return std::exchange(maximize_fun_, callback);
 }
 
 Window::FramebufferSizeFun
-Window::set_framebuffer_size_callback(FramebufferSizeFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_framebuffer_size_callback(const FramebufferSizeFun &callback) {
     return std::exchange(framebuffer_size_fun_, callback);
 }
 
 Window::ContentScaleFun
-Window::set_content_scale_callback(ContentScaleFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_content_scale_callback(const ContentScaleFun &callback) {
     return std::exchange(content_scale_fun_, callback);
 }
 
 Window::MouseButtonFun
-Window::set_mouse_button_callback(MouseButtonFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_mouse_button_callback(const MouseButtonFun &callback) {
     return std::exchange(mouse_button_fun_, callback);
 }
 
 Window::CursorPosFun
-Window::set_cursor_pos_callback(CursorPosFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_cursor_pos_callback(const CursorPosFun &callback) {
     return std::exchange(cursor_pos_fun_, callback);
 }
 
 Window::CursorEnterFun
-Window::set_cursor_enter_callback(CursorEnterFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_cursor_enter_callback(const CursorEnterFun &callback) {
     return std::exchange(cursor_enter_fun_, callback);
 }
 
 Window::ScrollFun
-Window::set_scroll_callback(ScrollFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_scroll_callback(const ScrollFun &callback) {
     return std::exchange(scroll_fun_, callback);
 }
 
 Window::KeyFun
-Window::set_key_callback(KeyFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_key_callback(const KeyFun &callback) {
     return std::exchange(key_fun_, callback);
 }
 
+Window::KeyFun
+Window::set_key_callback(Key key, bool exclusive, const KeyFun &callback) {
+    auto opt                        = key_map_[static_cast<int>(key)];
+    key_map_[static_cast<int>(key)] = {callback, exclusive};
+    KeyFun ret;
+    if (opt) ret = opt->first;
+    return ret;
+}
+
 Window::CharFun
-Window::set_char_callback(CharFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_char_callback(const CharFun &callback) {
     return std::exchange(char_fun_, callback);
 }
 
 Window::DropFun
-Window::set_drop_callback(DropFun callback) {
-    MAIN_THREAD_ONLY();
+Window::set_drop_callback(const DropFun &callback) {
     return std::exchange(drop_fun_, callback);
 }
 
@@ -698,7 +717,7 @@ Window::get_mouse_button(Button button) const {
     return static_cast<Action>(glfwGetMouseButton(window_, static_cast<int>(button)));
 }
 
-std::pair<double, double>
+std::tuple<double, double>
 Window::get_cursor_pos() const {
     MAIN_THREAD_ONLY();
     double x, y;
@@ -722,6 +741,17 @@ std::string
 Window::get_clipboard_string() const {
     MAIN_THREAD_ONLY();
     return glfwGetClipboardString(window_);
+}
+
+void
+Window::set_cursor(const Cursor &cursor) const {
+    glfwSetCursor(window_, cursor());
+}
+
+void
+Init::hint(int hint, int value) {
+    MAIN_THREAD_ONLY();
+    glfwInitHint(hint, value);
 }
 
 void
@@ -785,9 +815,10 @@ raw_mouse_motion_supported() {
 }
 
 std::string
-get_key_name(int key, int scancode) {
+get_key_name(Key key, int scancode) {
     MAIN_THREAD_ONLY();
-    return glfwGetKeyName(key, scancode);
+    auto name = glfwGetKeyName(static_cast<int>(key), scancode);
+    return name ? name : "";
 }
 
 int
@@ -811,7 +842,7 @@ get_proc_address(const std::string &proc_name) {
 }
 
 #define VERIFY_ENUM(ns, name) static_assert(static_cast<int>(ns::name) == GLFW_##name)
-/*
+
 VERIFY_ENUM(InitHint, JOYSTICK_HAT_BUTTONS);
 VERIFY_ENUM(InitHint, COCOA_CHDIR_RESOURCES);
 VERIFY_ENUM(InitHint, COCOA_MENUBAR);
@@ -827,6 +858,14 @@ VERIFY_ENUM(WindowHint, CENTER_CURSOR);
 VERIFY_ENUM(WindowHint, TRANSPARENT_FRAMEBUFFER);
 VERIFY_ENUM(WindowHint, FOCUS_ON_SHOW);
 VERIFY_ENUM(WindowHint, SCALE_TO_MONITOR);
+VERIFY_ENUM(WindowHint, STEREO);
+VERIFY_ENUM(WindowHint, SRGB_CAPABLE);
+VERIFY_ENUM(WindowHint, DOUBLEBUFFER);
+VERIFY_ENUM(WindowHint, OPENGL_FORWARD_COMPAT);
+VERIFY_ENUM(WindowHint, OPENGL_DEBUG_CONTEXT);
+VERIFY_ENUM(WindowHint, CONTEXT_NO_ERROR);
+VERIFY_ENUM(WindowHint, COCOA_RETINA_FRAMEBUFFER);
+VERIFY_ENUM(WindowHint, COCOA_GRAPHICS_SWITCHING);
 VERIFY_ENUM(WindowHint, RED_BITS);
 VERIFY_ENUM(WindowHint, GREEN_BITS);
 VERIFY_ENUM(WindowHint, BLUE_BITS);
@@ -838,31 +877,38 @@ VERIFY_ENUM(WindowHint, ACCUM_GREEN_BITS);
 VERIFY_ENUM(WindowHint, ACCUM_BLUE_BITS);
 VERIFY_ENUM(WindowHint, ACCUM_ALPHA_BITS);
 VERIFY_ENUM(WindowHint, AUX_BUFFERS);
-VERIFY_ENUM(WindowHint, STEREO);
 VERIFY_ENUM(WindowHint, SAMPLES);
-VERIFY_ENUM(WindowHint, SRGB_CAPABLE);
-VERIFY_ENUM(WindowHint, DOUBLEBUFFER);
 VERIFY_ENUM(WindowHint, REFRESH_RATE);
-VERIFY_ENUM(WindowHint, CLIENT_API);
-VERIFY_ENUM(WindowHint, CONTEXT_CREATION_API);
 VERIFY_ENUM(WindowHint, CONTEXT_VERSION_MAJOR);
 VERIFY_ENUM(WindowHint, CONTEXT_VERSION_MINOR);
-VERIFY_ENUM(WindowHint, OPENGL_FORWARD_COMPAT);
-VERIFY_ENUM(WindowHint, OPENGL_DEBUG_CONTEXT);
+VERIFY_ENUM(WindowHint, COCOA_FRAME_NAME);
+VERIFY_ENUM(WindowHint, X11_CLASS_NAME);
+VERIFY_ENUM(WindowHint, X11_INSTANCE_NAME);
+VERIFY_ENUM(WindowHint, CLIENT_API);
+VERIFY_ENUM(WindowHint, CONTEXT_CREATION_API);
 VERIFY_ENUM(WindowHint, OPENGL_PROFILE);
 VERIFY_ENUM(WindowHint, CONTEXT_ROBUSTNESS);
 VERIFY_ENUM(WindowHint, CONTEXT_RELEASE_BEHAVIOR);
-VERIFY_ENUM(WindowHint, CONTEXT_NO_ERROR);
-VERIFY_ENUM(WindowHint, COCOA_RETINA_FRAMEBUFFER);
-VERIFY_ENUM(WindowHint, COCOA_GRAPHICS_SWITCHING);
-
-VERIFY_ENUM(WindowHintString, COCOA_FRAME_NAME);
-VERIFY_ENUM(WindowHintString, X11_CLASS_NAME);
-VERIFY_ENUM(WindowHintString, X11_INSTANCE_NAME);
 
 VERIFY_ENUM(ClientAPI, OPENGL_API);
 VERIFY_ENUM(ClientAPI, OPENGL_ES_API);
 VERIFY_ENUM(ClientAPI, NO_API);
+
+VERIFY_ENUM(ContextCreationAPI, NATIVE_CONTEXT_API);
+VERIFY_ENUM(ContextCreationAPI, EGL_CONTEXT_API);
+VERIFY_ENUM(ContextCreationAPI, OSMESA_CONTEXT_API);
+
+VERIFY_ENUM(OpenGLProfile, OPENGL_CORE_PROFILE);
+VERIFY_ENUM(OpenGLProfile, OPENGL_COMPAT_PROFILE);
+VERIFY_ENUM(OpenGLProfile, OPENGL_ANY_PROFILE);
+
+VERIFY_ENUM(ContextRobustness, NO_RESET_NOTIFICATION);
+VERIFY_ENUM(ContextRobustness, LOSE_CONTEXT_ON_RESET);
+VERIFY_ENUM(ContextRobustness, NO_ROBUSTNESS);
+
+VERIFY_ENUM(ContextReleaseBehavior, ANY_RELEASE_BEHAVIOR);
+VERIFY_ENUM(ContextReleaseBehavior, RELEASE_BEHAVIOR_FLUSH);
+VERIFY_ENUM(ContextReleaseBehavior, RELEASE_BEHAVIOR_NONE);
 
 VERIFY_ENUM(Attribute, FOCUSED);
 VERIFY_ENUM(Attribute, ICONIFIED);
@@ -1040,5 +1086,5 @@ VERIFY_ENUM(Modifier, MOD_ALT);
 VERIFY_ENUM(Modifier, MOD_SUPER);
 VERIFY_ENUM(Modifier, MOD_CAPS_LOCK);
 VERIFY_ENUM(Modifier, MOD_NUM_LOCK);
-*/
+
 } // namespace GLFW

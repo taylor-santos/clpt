@@ -5,9 +5,11 @@
 
 #include <thread>
 #include <functional>
+#include <array>
 
 struct GLFWmonitor;
 struct GLFWwindow;
+struct GLFWcursor;
 
 namespace GLFW {
 
@@ -86,7 +88,7 @@ enum class WindowHint {
     // Enum Hints //
     ////////////////
     // Context related hints
-    CLIENT_API               = 0,
+    CLIENT_API               = 0x00022001,
     CONTEXT_CREATION_API     = 0x0002200B,
     OPENGL_PROFILE           = 0x00022008,
     CONTEXT_ROBUSTNESS       = 0x00022005,
@@ -100,27 +102,27 @@ enum class ClientAPI {
 };
 
 enum class ContextCreationAPI {
-    NATIVE_CONTEXT_API = 0,
-    EGL_CONTEXT_API    = 0,
-    OSMESA_CONTEXT_API = 0,
+    NATIVE_CONTEXT_API = 0x00036001,
+    EGL_CONTEXT_API    = 0x00036002,
+    OSMESA_CONTEXT_API = 0x00036003,
 };
 
 enum class OpenGLProfile {
-    OPENGL_CORE_PROFILE   = 0,
-    OPENGL_COMPAT_PROFILE = 0,
+    OPENGL_CORE_PROFILE   = 0x00032001,
+    OPENGL_COMPAT_PROFILE = 0x00032002,
     OPENGL_ANY_PROFILE    = 0,
 };
 
 enum class ContextRobustness {
-    NO_RESET_NOTIFICATION = 0,
-    LOSE_CONTEXT_ON_RESET = 0,
+    NO_RESET_NOTIFICATION = 0x00031001,
+    LOSE_CONTEXT_ON_RESET = 0x00031002,
     NO_ROBUSTNESS         = 0,
 };
 
 enum class ContextReleaseBehavior {
     ANY_RELEASE_BEHAVIOR   = 0,
-    RELEASE_BEHAVIOR_FLUSH = 0,
-    RELEASE_BEHAVIOR_NONE  = 0,
+    RELEASE_BEHAVIOR_FLUSH = 0x00035001,
+    RELEASE_BEHAVIOR_NONE  = 0x00035002,
 };
 
 enum class Attribute {
@@ -318,6 +320,15 @@ enum Modifier {
     MOD_NUM_LOCK  = 0x0020,
 };
 
+enum class CursorShape {
+    ARROW_CURSOR     = 0x00036001,
+    IBEAM_CURSOR     = 0x00036002,
+    CROSSHAIR_CURSOR = 0x00036003,
+    HAND_CURSOR      = 0x00036004,
+    HRESIZE_CURSOR   = 0x00036005,
+    VRESIZE_CURSOR   = 0x00036006,
+};
+
 class Error : public std::runtime_error {
 public:
     Error(int code, const char *msg);
@@ -333,9 +344,17 @@ private:
 
 class Init {
 public:
+    // This function sets hints for the next initialization of GLFW.
+    // This function must only be called from the main thread.
+    static void
+    hint(int hint, int value);
+
     static void
     hint(InitHint hint, int value);
 
+    // This function initializes the GLFW library. Before most GLFW functions can be used, GLFW must
+    // be initialized.
+    // This function must only be called from the main thread.
     static void
     initialize();
 
@@ -377,7 +396,7 @@ public:
     // This function returns the position, in screen coordinates, of the upper-left corner of the
     // specified monitor.
     // This function must only be called from the main thread.
-    [[nodiscard]] std::pair<int, int>
+    [[nodiscard]] std::tuple<int, int>
     get_pos() const;
 
     // This function returns the position, in screen coordinates, of the upper-left corner of the
@@ -391,13 +410,13 @@ public:
 
     // This function returns the size, in millimetres, of the display area of the specified monitor.
     // This function must only be called from the main thread.
-    [[nodiscard]] std::pair<int, int>
+    [[nodiscard]] std::tuple<int, int>
     get_physical_size() const;
 
     // This function retrieves the content scale for the specified monitor. The content scale is the
     // ratio between the current DPI and the platform's default DPI.
     // This function must only be called from the main thread.
-    [[nodiscard]] std::pair<float, float>
+    [[nodiscard]] std::tuple<float, float>
     get_content_scale() const;
 
     // This function returns a human-readable name, encoded as UTF-8, of the specified monitor.
@@ -444,7 +463,8 @@ public:
     void
     set_gamma_ramp(const std::vector<GammaRamp> &gamma_ramp);
 
-    GLFWmonitor *
+    // Get the internal pointer used by GLFW's native functions.
+    [[nodiscard]] GLFWmonitor *
     operator()() const;
 
 private:
@@ -454,6 +474,32 @@ private:
     Fun          callback_{};
 
     friend class Window;
+};
+
+struct Image {
+    int                        width;
+    int                        height;
+    std::vector<unsigned char> pixels;
+};
+
+class Cursor {
+public:
+    // Creates a new custom cursor image that can be set for a window with Window::set_cursor.
+    // This function must only be called from the main thread.
+    explicit Cursor(Image &&image, int xhot, int yhot);
+
+    // Returns a cursor with a standard shape, that can be set for a window with Window::set_cursor.
+    // This function must only be called from the main thread.
+    explicit Cursor(CursorShape shape);
+
+    ~Cursor();
+
+    // Get the internal pointer used by GLFW's native functions.
+    [[nodiscard]] GLFWcursor *
+    operator()() const;
+
+private:
+    GLFWcursor *cursor_;
 };
 
 class Window {
@@ -485,9 +531,17 @@ public:
     // retain their values until changed by a call to this function or Window::default_hints, or
     // until the library is terminated.
     // This function must only be called from the main thread.
+    static void
+    hint(int hint, int value);
+
+    static void
+    hint(int hint, const std::string &value);
+
     template<WindowHint H, typename T>
     static void
     hint(T value) = delete;
+
+    // Specialized window hint functions that only accept the required type for the given hint enum.
 
     template<WindowHint H>
     requires(
@@ -500,7 +554,7 @@ public:
         H == WindowHint::OPENGL_FORWARD_COMPAT || H == WindowHint::OPENGL_DEBUG_CONTEXT ||
         H == WindowHint::CONTEXT_NO_ERROR || H == WindowHint::COCOA_RETINA_FRAMEBUFFER ||
         H == WindowHint::COCOA_GRAPHICS_SWITCHING) static void hint(bool value) {
-        hint_(static_cast<int>(H), value);
+        hint(static_cast<int>(H), value);
     }
 
     template<WindowHint H>
@@ -513,51 +567,59 @@ public:
         H == WindowHint::SAMPLES || H == WindowHint::REFRESH_RATE ||
         H == WindowHint::CONTEXT_VERSION_MAJOR ||
         H == WindowHint::CONTEXT_VERSION_MINOR) static void hint(int value) {
-        hint_(static_cast<int>(H), value);
+        hint(static_cast<int>(H), value);
     }
 
     template<WindowHint H>
     requires(
         H == WindowHint::COCOA_FRAME_NAME || H == WindowHint::X11_CLASS_NAME ||
         H == WindowHint::X11_INSTANCE_NAME) static void hint(const std::string &value) {
-        hint_(static_cast<int>(H), value);
+        hint(static_cast<int>(H), value);
     }
     template<WindowHint H>
     requires(
         H == WindowHint::COCOA_FRAME_NAME || H == WindowHint::X11_CLASS_NAME ||
         H == WindowHint::X11_INSTANCE_NAME) static void hint(const char *value) {
-        hint_(static_cast<int>(H), value);
+        hint(static_cast<int>(H), value);
     }
 
     template<WindowHint H>
     requires(H == WindowHint::CLIENT_API) static void hint(ClientAPI value) {
-        hint_(static_cast<int>(H), static_cast<int>(value));
+        hint(static_cast<int>(H), static_cast<int>(value));
     }
 
     template<WindowHint H>
     requires(H == WindowHint::CONTEXT_CREATION_API) static void hint(ContextCreationAPI value) {
-        hint_(static_cast<int>(H), static_cast<int>(value));
+        hint(static_cast<int>(H), static_cast<int>(value));
     }
 
     template<WindowHint H>
     requires(H == WindowHint::OPENGL_PROFILE) static void hint(OpenGLProfile value) {
-        hint_(static_cast<int>(H), static_cast<int>(value));
+        hint(static_cast<int>(H), static_cast<int>(value));
     }
 
     template<WindowHint H>
     requires(H == WindowHint::CONTEXT_ROBUSTNESS) static void hint(ContextRobustness value) {
-        hint_(static_cast<int>(H), static_cast<int>(value));
+        hint(static_cast<int>(H), static_cast<int>(value));
     }
 
     template<WindowHint H>
     requires(H == WindowHint::CONTEXT_RELEASE_BEHAVIOR) static void hint(
         ContextReleaseBehavior value) {
-        hint_(static_cast<int>(H), static_cast<int>(value));
+        hint(static_cast<int>(H), static_cast<int>(value));
     }
 
+    // This function returns the Window whose OpenGL or OpenGL ES context is current on the calling
+    // thread. If no context is current, returns NULL.
+    // Ownership of this pointer belongs to the Window object that Window::make_current was last
+    // called on. It is undefined behavior to use this pointer after this Window object has gone out
+    // of scope.
     static const Window *
     get_current_context();
 
+    // This function makes the calling thread's current OpenGL or OpenGL ES context non-current.
+    // Contexts must be made non-current before they can be used on a different thread, and before
+    // their associated Window is deleted.
     static void
     clear_current_context();
 
@@ -586,9 +648,13 @@ public:
 
     ~Window();
 
-    GLFWwindow *
+    // Get the internal pointer used by GLFW's native functions.
+    [[nodiscard]] GLFWwindow *
     operator()() const;
 
+    // This function makes the OpenGL or OpenGL ES context of the specified window current on the
+    // calling thread. A context must only be made current on a single thread at a time and each
+    // thread can have only a single current context at a time.
     void
     make_context_current() const;
 
@@ -610,12 +676,12 @@ public:
     // specified, the window reverts to its default icon.
     // This function must only be called from the main thread.
     void
-    set_icon(const std::vector<void *> &images) const; // TODO unimplemented
+    set_icon(std::vector<Image> &&images) const;
 
     // This function retrieves the position, in screen coordinates, of the upper-left corner of the
     // content area of the specified window.
     // This function must only be called from the main thread.
-    [[nodiscard]] std::pair<int, int>
+    [[nodiscard]] std::tuple<int, int>
     get_pos() const;
 
     // This function sets the position, in screen coordinates, of the upper-left corner of the
@@ -628,7 +694,7 @@ public:
     // This function retrieves the size, in screen coordinates, of the content area of the specified
     // window.
     // This function must only be called from the main thread.
-    [[nodiscard]] std::pair<int, int>
+    [[nodiscard]] std::tuple<int, int>
     get_size() const;
 
     // This function sets the size limits of the content area of the specified window. If the window
@@ -654,7 +720,7 @@ public:
 
     // This function retrieves the size, in pixels, of the framebuffer of the specified window.
     // This function must only be called from the main thread.
-    [[nodiscard]] std::pair<int, int>
+    [[nodiscard]] std::tuple<int, int>
     get_framebuffer_size() const;
 
     // This function retrieves the size, in screen coordinates, of each edge of the frame of the
@@ -666,7 +732,7 @@ public:
     // This function retrieves the content scale for the specified window. The content scale is the
     // ratio between the current DPI and the platform's default DPI.
     // This function must only be called from the main thread.
-    [[nodiscard]] std::pair<float, float>
+    [[nodiscard]] std::tuple<float, float>
     get_content_scale() const;
 
     // This function returns the opacity of the window, including any decorations.
@@ -751,52 +817,55 @@ public:
     set_attribute(Attribute attrib, int value) const;
 
     PosFun
-    set_position_callback(PosFun callback);
+    set_position_callback(const PosFun &callback);
 
     SizeFun
-    set_size_callback(SizeFun callback);
+    set_size_callback(const SizeFun &callback);
 
     CloseFun
-    set_close_callback(CloseFun callback);
+    set_close_callback(const CloseFun &callback);
 
     RefreshFun
-    set_refresh_callback(RefreshFun callback);
+    set_refresh_callback(const RefreshFun &callback);
 
     FocusFun
-    set_focus_callback(FocusFun callback);
+    set_focus_callback(const FocusFun &callback);
 
     IconifyFun
-    set_iconfiy_callback(IconifyFun callback);
+    set_iconfiy_callback(const IconifyFun &callback);
 
     MaximizeFun
-    set_maximize_callback(MaximizeFun callback);
+    set_maximize_callback(const MaximizeFun &callback);
 
     FramebufferSizeFun
-    set_framebuffer_size_callback(FramebufferSizeFun callback);
+    set_framebuffer_size_callback(const FramebufferSizeFun &callback);
 
     ContentScaleFun
-    set_content_scale_callback(ContentScaleFun callback);
+    set_content_scale_callback(const ContentScaleFun &callback);
 
     MouseButtonFun
-    set_mouse_button_callback(MouseButtonFun callback);
+    set_mouse_button_callback(const MouseButtonFun &callback);
 
     CursorPosFun
-    set_cursor_pos_callback(CursorPosFun callback);
+    set_cursor_pos_callback(const CursorPosFun &callback);
 
     CursorEnterFun
-    set_cursor_enter_callback(CursorEnterFun callback);
+    set_cursor_enter_callback(const CursorEnterFun &callback);
 
     ScrollFun
-    set_scroll_callback(ScrollFun callback);
+    set_scroll_callback(const ScrollFun &callback);
 
     KeyFun
-    set_key_callback(KeyFun callback);
+    set_key_callback(const KeyFun &callback);
+
+    KeyFun
+    set_key_callback(Key key, bool exclusive, const KeyFun &callback);
 
     CharFun
-    set_char_callback(CharFun callback);
+    set_char_callback(const CharFun &callback);
 
     DropFun
-    set_drop_callback(DropFun callback);
+    set_drop_callback(const DropFun &callback);
 
     void
     swap_buffers() const;
@@ -819,7 +888,7 @@ public:
     [[nodiscard]] Action
     get_mouse_button(Button button) const;
 
-    [[nodiscard]] std::pair<double, double>
+    [[nodiscard]] std::tuple<double, double>
     get_cursor_pos() const;
 
     void
@@ -830,6 +899,9 @@ public:
 
     std::string
     get_clipboard_string() const;
+
+    void
+    set_cursor(const Cursor &cursor) const;
 
 private:
     Window(int width, int height, const char *title, GLFWmonitor *monitor, GLFWwindow *share);
@@ -855,57 +927,8 @@ private:
     CharFun            char_fun_{};
     DropFun            drop_fun_{};
 
-    static void
-    hint_(int hint, int value);
-
-    static void
-    hint_(int hint, const std::string &value);
+    std::array<std::optional<std::pair<KeyFun, bool>>, static_cast<size_t>(Key::KEY_LAST)> key_map_;
 };
-
-/*
-template<WindowHint H>
-requires(
-    H == WindowHint::RESIZABLE || H == WindowHint::VISIBLE || H == WindowHint::DECORATED ||
-    H == WindowHint::FOCUSED || H == WindowHint::AUTO_ICONIFY || H == WindowHint::FLOATING ||
-    H == WindowHint::MAXIMIZED || H == WindowHint::CENTER_CURSOR ||
-    H == WindowHint::TRANSPARENT_FRAMEBUFFER || H == WindowHint::FOCUS_ON_SHOW ||
-    H == WindowHint::SCALE_TO_MONITOR || H == WindowHint::STEREO || H == WindowHint::SRGB_CAPABLE ||
-    H == WindowHint::DOUBLEBUFFER || H == WindowHint::OPENGL_FORWARD_COMPAT ||
-    H == WindowHint::OPENGL_DEBUG_CONTEXT || H == WindowHint::CONTEXT_NO_ERROR ||
-    H == WindowHint::COCOA_RETINA_FRAMEBUFFER ||
-    H == WindowHint::COCOA_GRAPHICS_SWITCHING)
-    void
-    Window::hint<H, bool>(bool value) {
-        Window::hint_(static_cast<int>(H), static_cast<int>(value));
-    }
-};
- */
-
-// template<>
-// void
-// Window::hint<WindowHint::CLIENT_API>(ClientAPI value) {
-//     hint_(static_cast<int>(WindowHint::CLIENT_API), static_cast<int>(value));
-// }
-//  template<>
-//  void
-//  Window::hint<WindowHint::CONTEXT_CREATION_API>(ContextCreationAPI value) {
-//      hint_(static_cast<int>(WindowHint::CONTEXT_CREATION_API), static_cast<int>(value));
-//  }
-//  template<>
-//  void
-//  Window::hint<WindowHint::OPENGL_PROFILE>(OpenGLProfile value) {
-//      hint_(static_cast<int>(WindowHint::OPENGL_PROFILE), static_cast<int>(value));
-//  }
-//  template<>
-//  void
-//  Window::hint<WindowHint::CONTEXT_ROBUSTNESS>(ContextRobustness value) {
-//      hint_(static_cast<int>(WindowHint::CONTEXT_ROBUSTNESS), static_cast<int>(value));
-//  }
-//  template<>
-//  void
-//  Window::hint<WindowHint::CONTEXT_RELEASE_BEHAVIOR>(ContextReleaseBehavior value) {
-//      hint_(static_cast<int>(WindowHint::CONTEXT_RELEASE_BEHAVIOR), static_cast<int>(value));
-//  }
 
 double
 get_time();
@@ -935,7 +958,7 @@ bool
 raw_mouse_motion_supported();
 
 std::string
-get_key_name(int key, int scancode);
+get_key_name(Key key, int scancode);
 
 int
 get_key_scancode(Key key);
