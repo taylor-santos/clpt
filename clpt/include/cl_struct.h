@@ -43,7 +43,14 @@ typedef struct Object {
         Box    box;
     };
     cl_uchar3 color;
-    cl_float  emission;
+    float     pct_spec; // Percentage of specular reflection
+    float     roughness;
+    float     IOR;
 } Object;
+
+typedef struct Light {
+    Object   object;
+    cl_float emission;
+} Light;
 
 #pragma pack(pop)

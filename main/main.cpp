@@ -75,7 +75,7 @@ ThreadSafe<Camera>                             shared_camera;
 ThreadSafe<bool>                               cursor_locked = false;
 ThreadSafe<glm::vec2>                          shared_velocity;
 ThreadSafe<glm::vec2>                          sensitivity{1, 1};
-ThreadSafe<int>                                input = 2000;
+ThreadSafe<int>                                input = 1;
 
 bool                           fullscreen = false;
 std::tuple<int, int, int, int> windowed_dim;
@@ -126,8 +126,11 @@ render_loop(
     }
 
     shared_camera.modify([](Camera &cam) {
+        //        cam.transform.setLocalPosition({0, 0.3f, -1.6f});
+        //        cam.setRotation(0, 30.0f);
         cam.transform.setLocalPosition({0, 0, 3});
-        cam.setFOV(glm::degrees(1.0f));
+        cam.setFOV(45);
+
         // cam.transform.setLocalPosition({-0.34766639522035447, 0, 1.9952449076456595});
         // cam.setRotation(glm::degrees(3.87637758f), glm::degrees(0.0f));
         // cam.setFOV(glm::degrees(1.57079637f));
@@ -145,59 +148,159 @@ render_loop(
     ImGui_ImplGlfw_InitForOpenGL(window(), true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    Object objects[] = {
+    std::vector<Object> objects{
+        /*
         {
-            // Light
-            //            .type = SPHERE,
-            .type = BOX,
-            .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f, 0.5f}},
-            //            .sphere   = {.center = {1, -0.2f, 0}, .radius = 0.2f},
-            .color    = {255, 255, 255},
-            .emission = 4,
-        },
+            .type  = BOX,
+            .box   = {.min = {-0.5f, 0.0f, -0.5f}, .max = {0.5f, 0.0f, 0.5f}},
+            .color = {255, 255, 255},
+        }
+         */
+        /*
         {
             // Sphere
             .type     = SPHERE,
-            .sphere   = {.center = {0, -0.7f, 0}, .radius = 0.3f},
-            .color    = {255, 255, 255},
-            .emission = 0,
+            .sphere   = {.center = {-0.5f, -0.5f, -0.4f}, .radius = 0.51f},
+            .color    = {200, 200, 200},
+            .pct_spec = 0.0f,
+            .IOR      = 1.0f,
         },
         {
+            // Sphere
+            .type      = SPHERE,
+            .sphere    = {.center = {0.5f, -0.5f, -0.4f}, .radius = 0.51f},
+            .color     = {255, 255, 255},
+            .pct_spec  = 0.9f,
+            .roughness = 0.0f,
+            .IOR       = 1.0f,
+        },
+         */
+        {
             // Floor
-            .type     = BOX,
-            .box      = {.min = {-1, -1.05f, -1}, .max = {1, -1, 1}},
-            .color    = {200, 200, 200},
-            .emission = 0,
+            .type  = BOX,
+            .box   = {.min = {-1, -1.05f, -1}, .max = {1, -1, 1}},
+            .color = {255, 255, 255},
         },
         {
             // Left Wall
-            .type     = BOX,
-            .box      = {.min = {-1.05f, -1, -1}, .max = {-1, 1, 1}},
-            .color    = {255, 100, 100},
-            .emission = 0,
+            .type  = BOX,
+            .box   = {.min = {-1.05f, -1, -1}, .max = {-1, 1, 1}},
+            .color = {255, 0, 0},
         },
         {
             // Back Wall
-            .type     = BOX,
-            .box      = {.min = {-1, -1, -1.05f}, .max = {1, 1, -1}},
-            .color    = {200, 200, 200},
-            .emission = 0,
+            .type  = BOX,
+            .box   = {.min = {-1, -1, -1.05f}, .max = {1, 1, -1}},
+            .color = {255, 255, 255},
         },
         {
             // Right Wall
-            .type     = BOX,
-            .box      = {.min = {1, -1, -1}, .max = {1.05f, 1, 1}},
-            .color    = {100, 255, 100},
-            .emission = 0,
+            .type  = BOX,
+            .box   = {.min = {1, -1, -1}, .max = {1.05f, 1, 1}},
+            .color = {0, 255, 0},
         },
+        /*
         {
             // Ceiling
-            .type     = BOX,
-            .box      = {.min = {-1, 1.05f, -1}, .max = {1, 1, 1}},
-            .color    = {200, 200, 200},
-            .emission = 0,
+            .type  = BOX,
+            .box   = {.min = {-1, 1.05f, -1}, .max = {1, 1, 1}},
+            .color = {255, 255, 255},
         },
+         */
     };
+
+    for (int x = 0; x < 10; x++) {
+        for (int y = 0; y < 10; y++) {
+            objects.push_back({
+                .type = SPHERE,
+                .sphere =
+                    {
+                        .center = {-0.9f + (float)x / 5.0f, -0.9f, -0.9f + (float)y / 5.0f},
+                        .radius = 0.1f,
+                    },
+                .color     = {255, 255, 255},
+                .pct_spec  = (float)x / 9.0f,
+                .roughness = (float)y / 9.0f,
+            });
+        }
+    }
+
+    //    float a = glm::radians(45.0f);
+    //    float y = 1000;
+
+    std::vector<Light> lights{
+        {
+            .object =
+                {
+                    //                    .type = BOX,
+                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
+                    //                    0.5f}},
+                    .type   = SPHERE,
+                    .sphere = {.center = {0, 10.0f, 0}, .radius = 8.0f},
+                    .color  = {255, 255, 255},
+                },
+            .emission = 1,
+        },
+        /*
+        {
+            .object =
+                {
+                    .type = SPHERE,
+                    .sphere =
+                        {
+                            .center = {0, y, 0},
+                            .radius = y * glm::sin(a),
+                        },
+                    .color = {255, 0, 0},
+                },
+            .emission = 1,
+        },
+        {
+            .object =
+                {
+                    //                    .type = BOX,
+                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
+                    //                    0.5f}},
+                    .type   = SPHERE,
+                    .sphere = {.center = {0, 2, 0}, .radius = 1.1f},
+                    .color  = {255, 255, 255},
+                },
+            .emission = 6,
+        },*/
+
+    };
+    /*
+    std::vector<Object> objects{
+       {
+           .type = SPHERE,
+           .sphere =
+               {
+                   .center = {0, 0, 0},
+                   .radius = 0.5f,
+               },
+           .color = {255, 255, 255},
+       },
+       {
+           .type = SPHERE,
+           .sphere =
+               {
+                   .center = {2, 0, 0},
+                   .radius = 0.5f,
+               },
+           .color = {255, 255, 255},
+       },
+       {
+           .type = SPHERE,
+           .sphere =
+               {
+                   .center = {1, 0, -5},
+                   .radius = 0.5f,
+               },
+           .color = {255, 0, 0},
+       },
+    };
+    std::vector<Light> lights;
+    */
 
     std::string kernel_code;
     {
@@ -210,8 +313,9 @@ render_loop(
 
     auto renderer = Render::Renderer(kernel_code, "my_kernel", width, height);
 
-    renderer.addInputBuffer(1, 16 * sizeof(float));
-    renderer.addInputBuffer(2, width * height * sizeof(unsigned long long));
+    renderer.addInputBuffer(1, 16 * sizeof(float)); // Camera
+
+    renderer.addInputBuffer(2, width * height * sizeof(unsigned long long)); // Random Seed
 
     auto r   = std::random_device();
     auto gen = std::mt19937_64(r());
@@ -225,11 +329,26 @@ render_loop(
         renderer.writeBuffer(2, width * height * sizeof(unsigned long long), seed.data());
     }
 
-    renderer.addInputBuffer(5, sizeof(objects));
-    renderer.writeBuffer(5, sizeof(objects), objects);
+    if (!objects.empty()) {
+        renderer.addInputBuffer(5, objects.size() * sizeof(Object));
+        renderer.writeBuffer(5, objects.size() * sizeof(Object), objects.data());
+    } else {
+        renderer.setKernelArg(5, 0, nullptr);
+    }
     {
-        unsigned int val = sizeof(objects) / sizeof(*objects);
+        auto val = static_cast<unsigned int>(objects.size());
         renderer.setKernelArg(6, sizeof(val), &val);
+    }
+
+    if (!lights.empty()) {
+        renderer.addInputBuffer(7, lights.size() * sizeof(Light));
+        renderer.writeBuffer(7, lights.size() * sizeof(Light), lights.data());
+    } else {
+        renderer.setKernelArg(7, 0, nullptr);
+    }
+    {
+        auto val = static_cast<unsigned int>(lights.size());
+        renderer.setKernelArg(8, sizeof(val), &val);
     }
 
     int frame = 0;
@@ -248,6 +367,9 @@ render_loop(
             //            objects[0].sphere.center.x = (cl_float)sin(GLFW::get_time()) / 2;
             //            objects[0].sphere.center.z = (cl_float)cos(GLFW::get_time()) / 2;
             //            renderer.writeBuffer(5, sizeof(objects), objects);
+
+            //            objects[1].IOR = 2 + (cl_float)cos(GLFW::get_time());
+            //            renderer.writeBuffer(5, objects.size() * sizeof(Object), objects.data());
 
             frame++;
 
@@ -277,17 +399,14 @@ render_loop(
             ImGui::NewFrame();
             ImGui::SetNextWindowPos({0, 0});
             if (ImGui::Begin(
-                    "Framerate",
+                    "Frame Time",
                     nullptr,
                     ImGuiWindowFlags_::ImGuiWindowFlags_AlwaysAutoResize)) {
                 auto [min, max] = std::minmax_element(frames.begin(), frames.end());
-                auto label      = std::to_string((int)ImGui::GetIO().Framerate) +
-                             " fps\n"
-                             "Min: " +
-                             std::to_string((int)*min) +
-                             " fps\n"
+                auto label      = std::to_string(frames.back()) +
+                             " ms\n"
                              "Max: " +
-                             std::to_string((int)*max) + " fps";
+                             std::to_string(*max) + " ms\nMin: " + std::to_string(*min) + " ms";
                 ImGui::PlotLines(
                     label.c_str(),
                     frames.data(),
@@ -300,6 +419,17 @@ render_loop(
             }
             ImGui::End();
 
+            if (ImGui::Begin(
+                    "SPP",
+                    nullptr,
+                    ImGuiWindowFlags_::ImGuiWindowFlags_AlwaysAutoResize)) {
+                int val = input;
+                if (ImGui::InputInt("SPP", &val)) {
+                    input = val;
+                }
+            }
+            ImGui::End();
+
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -308,12 +438,12 @@ render_loop(
             auto curr_time = GLFW::get_time();
             auto time_diff = curr_time - last_time;
             if (time_diff > 0.05) {
-                auto fps = (frame - last_frame) / time_diff;
-                // auto frame_time = time_diff / (frame - last_frame);
+                // auto fps = (frame - last_frame) / time_diff;
+                auto frame_time = 1000.0f * time_diff / (frame - last_frame);
                 if (frames.size() >= 120) {
                     frames.erase(frames.begin());
                 }
-                frames.push_back(static_cast<float>(fps));
+                frames.push_back(static_cast<float>(frame_time));
 
                 last_frame = frame;
                 last_time  = curr_time;
@@ -391,7 +521,7 @@ main() try {
     // GLFW::Window::hint<GLFW::WindowHint::OPENGL_FORWARD_COMPAT>(true); // 3.0+only
 #endif
 
-    int width = 1280, height = 720;
+    int width = 1024, height = 1024;
 
     auto monitor    = GLFW::Monitor::get_primary();
     auto video_mode = monitor.get_video_mode();
