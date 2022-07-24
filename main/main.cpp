@@ -16,10 +16,11 @@
 #include <mutex>
 #include <shared_mutex>
 #include <random>
+#include <fstream>
+#include <numeric>
 
 #define NOMINMAX
 #include <GL/gl3w.h>
-#include <fstream>
 
 #include "glm/gtc/type_ptr.hpp"
 
@@ -79,6 +80,322 @@ ThreadSafe<int>                                input = 1;
 
 bool                           fullscreen = false;
 std::tuple<int, int, int, int> windowed_dim;
+
+static inline cl_float3
+min(const cl_float3 &a, const cl_float3 &b) {
+    return {
+        std::min(a.x, b.x),
+        std::min(a.y, b.y),
+        std::min(a.z, b.z),
+    };
+}
+
+static inline cl_float3
+max(const cl_float3 &a, const cl_float3 &b) {
+    return {
+        std::max(a.x, b.x),
+        std::max(a.y, b.y),
+        std::max(a.z, b.z),
+    };
+}
+
+static inline cl_float3
+operator+(const cl_float3 &vec, float s) {
+    return {
+        vec.x + s,
+        vec.y + s,
+        vec.z + s,
+    };
+}
+
+static inline cl_float3
+operator+(const cl_float3 &a, const cl_float3 &b) {
+    return {
+        a.x + b.x,
+        a.y + b.y,
+        a.z + b.z,
+    };
+}
+
+static inline cl_float3
+operator-(const cl_float3 &vec, float s) {
+    return {
+        vec.x - s,
+        vec.y - s,
+        vec.z - s,
+    };
+}
+
+static inline cl_float3
+operator-(const cl_float3 &a, const cl_float3 &b) {
+    return {
+        a.x - b.x,
+        a.y - b.y,
+        a.z - b.z,
+    };
+}
+
+static inline cl_float3
+operator/(const cl_float3 &vec, float s) {
+    return {
+        vec.x / s,
+        vec.y / s,
+        vec.z / s,
+    };
+}
+
+static std::pair<cl_float3, cl_float3>
+object_bounds(const Object &obj) {
+    switch (obj.type) {
+        case Type::BOX:
+            return {
+                min(obj.box.min, obj.box.max),
+                max(obj.box.min, obj.box.max),
+            };
+        case Type::SPHERE:
+            return {
+                obj.sphere.center - obj.sphere.radius,
+                obj.sphere.center + obj.sphere.radius,
+            };
+    }
+    return {}; // silence compiler warning, all paths should be covered above.
+}
+
+float
+kd_metric(
+    float                                       lower_bound,
+    float                                       upper_bound,
+    const std::vector<std::pair<float, float>> &bounds,
+    float                                       split) {
+    (void)lower_bound;
+    (void)upper_bound;
+    (void)bounds;
+    (void)split;
+    auto total = bounds.size();
+    int  below = 0, above = 0;
+    for (auto &[l, u] : bounds) {
+        if (l < split) below++;
+        if (u > split) above++;
+    }
+    if (above == 0) {
+        return (upper_bound - split) / (upper_bound - lower_bound);
+    }
+    if (below == 0) {
+        return (split - lower_bound) / (upper_bound - lower_bound);
+    }
+    return glm::sin(glm::pi<float>() * (float)below / (float)total) *
+           glm::sin(glm::pi<float>() * (float)above / (float)total);
+}
+
+void
+generate_kd(
+    cl_float3                                           lower_bound,
+    cl_float3                                           upper_bound,
+    int                                                 depth,
+    std::vector<cl_uint>                              &&indices,
+    const std::vector<std::pair<cl_float3, cl_float3>> &bounds,
+    std::vector<KDTreeNode>                            &out_nodes,
+    std::vector<cl_uint>                               &out_indices) {
+    //    for (auto i : indices) {
+    //        assert(bounds[i].first.x >= lower_bound.x);
+    //        assert(bounds[i].first.y >= lower_bound.y);
+    //        assert(bounds[i].first.z >= lower_bound.z);
+    //        assert(bounds[i].second.x <= upper_bound.x);
+    //        assert(bounds[i].second.y <= upper_bound.y);
+    //        assert(bounds[i].second.z <= upper_bound.z);
+    //    }
+    out_nodes.emplace_back();
+    auto &node       = out_nodes.back();
+    node.lower_bound = lower_bound;
+    node.upper_bound = upper_bound;
+
+    if (depth >= MAX_KD_DEPTH || indices.empty()) {
+        node.flags = 3;
+        node.nprims |= (indices.size() << 2);
+        if (indices.empty()) {
+            node.one_prim = 0;
+        } else if (indices.size() == 1) {
+            node.one_prim = indices.front();
+        } else {
+            node.prim_ids_offset = static_cast<cl_uint>(out_indices.size());
+            out_indices.insert(out_indices.end(), indices.begin(), indices.end());
+        }
+
+        return;
+    }
+    /*
+    int   best_axis    = -1;
+    float best_split   = 0;
+    int   best_overlap = 0;
+    for (int axis = 0; axis < 3; axis++) {
+        std::vector<float> points;
+        points.reserve(2 * indices.size());
+        for (auto i : indices) {
+            auto &[lb, ub] = bounds[i];
+            auto l = lb.s[axis], u = ub.s[axis];
+            points.push_back(l);
+            points.push_back(u);
+        }
+        std::transform(indices.begin(), indices.end(), std::back_inserter(points), [&](cl_uint i) {
+            auto &[lb, ub] = bounds[i];
+            auto mid       = (lb + ub) / 2;
+            return mid.s[axis];
+        });
+        std::sort(points.begin(), points.end());
+        float mid     = *(points.begin() + points.size() / 2);
+        int   overlap = 0;
+        for (auto i : indices) {
+            auto &[lb, ub] = bounds[i];
+            auto l = lb.s[axis], u = ub.s[axis];
+            if (l <= mid && u >= mid) {
+                overlap++;
+            }
+        }
+        if (best_axis == -1 || overlap < best_overlap) {
+            best_axis    = axis;
+            best_split   = mid;
+            best_overlap = overlap;
+        }
+    }
+    auto axis  = best_axis;
+    auto split = best_split;
+     */
+
+    //    int   best_axis = -1;
+    //    float best_vol  = 0;
+    /*
+    auto ext = upper_bound - lower_bound;
+
+    for (int axis = 0; axis < 3; axis++) {
+        float min_b = 0, max_b = 0;
+        for (int i = 0; i < indices.size(); i++) {
+            auto id       = indices[i];
+            auto [lb, ub] = bounds[id];
+            auto l        = lb.s[axis];
+            auto u        = ub.s[axis];
+            if (i == 0 || l < min_b) min_b = l;
+            if (i == 0 || u > max_b) max_b = u;
+        }
+
+        if (min_b > lower_bound.s[axis]) {
+            float vol = (min_b - lower_bound.s[axis]);
+            for (int a = 0; a < 3; a++) {
+                if (a != axis) vol *= ext.s[a];
+            }
+            std::cout << min_b << " " << vol << std::endl;
+        }
+        if (max_b < upper_bound.s[axis]) {
+            float vol = (upper_bound.s[axis] - max_b);
+            for (int a = 0; a < 3; a++) {
+                if (a != axis) vol *= ext.s[a];
+            }
+            std::cout << max_b << " " << vol << std::endl;
+        }
+    }
+
+    int axis = ext.x > ext.y ? (ext.x > ext.z ? 0 : 2) : (ext.y > ext.z ? 1 : 2);
+
+    float split = 0;
+    {
+        std::vector<float> pts;
+        pts.reserve(2 * indices.size());
+        for (auto id : indices) {
+            auto [lb, ub] = bounds[id];
+            auto l        = lb.s[axis] ;// - 0.0001f;
+            auto u        = ub.s[axis] ;// + 0.0001f;
+            if (l >= lower_bound.s[axis]) pts.push_back(l);
+            if (u <= upper_bound.s[axis]) pts.push_back(u);
+        }
+        std::sort(pts.begin(), pts.end());
+        float mid = *(pts.begin() + pts.size() / 2);
+        float lb  = lower_bound.s[axis];
+        float ub  = upper_bound.s[axis];
+        split     = std::clamp(mid, lb, ub);
+    }
+    */
+
+    // float split = (lower_bound.s[axis] + upper_bound.s[axis]) / 2;
+
+    float best_metric = 0;
+    int   best_axis   = 0;
+    float best_split  = 0;
+
+    //    auto r    = std::random_device();
+    //    auto gen  = std::mt19937_64(r());
+    //    auto dist = std::uniform_real_distribution<float>(0, 1);
+
+    for (int axis = 0; axis < 3; axis++) {
+        std::vector<std::pair<float, float>> axis_bounds;
+        axis_bounds.reserve(indices.size());
+        for (auto id : indices) {
+            auto &[lb, ub] = bounds[id];
+            axis_bounds.emplace_back(lb.s[axis], ub.s[axis]);
+        }
+
+        float l = lower_bound.s[axis];
+        float u = upper_bound.s[axis];
+        for (auto splits : axis_bounds) {
+            //            float split  = l + dist(gen) * (u - l);
+            auto [s1, s2] = splits;
+            {
+                float metric = kd_metric(l, u, axis_bounds, s1);
+                if (metric > best_metric) {
+                    best_metric = metric;
+                    best_axis   = axis;
+                    best_split  = s1;
+                }
+            }
+            {
+                float metric = kd_metric(l, u, axis_bounds, s2);
+                if (metric > best_metric) {
+                    best_metric = metric;
+                    best_axis   = axis;
+                    best_split  = s2;
+                }
+            }
+        }
+    }
+
+    node.split = best_split;
+    node.flags = best_axis;
+
+    std::vector<cl_uint> lower_ids, upper_ids;
+    for (auto i : indices) {
+        auto &[lb, ub] = bounds[i];
+        if (lb.s[best_axis] < best_split) {
+            lower_ids.push_back(i);
+        }
+        if (ub.s[best_axis] > best_split) {
+            upper_ids.push_back(i);
+        }
+    }
+    auto node_id = out_nodes.size() - 1;
+    {
+        auto upper         = upper_bound;
+        upper.s[best_axis] = best_split;
+        generate_kd(
+            lower_bound,
+            upper,
+            depth + 1,
+            std::move(lower_ids),
+            bounds,
+            out_nodes,
+            out_indices);
+    }
+    out_nodes[node_id].above_child |= (out_nodes.size() << 2);
+    {
+        auto lower         = lower_bound;
+        lower.s[best_axis] = best_split;
+        generate_kd(
+            lower,
+            upper_bound,
+            depth + 1,
+            std::move(upper_ids),
+            bounds,
+            out_nodes,
+            out_indices);
+    }
+}
 
 [[maybe_unused]] static void
 physics_loop(const GLFW::Window &window, int) {
@@ -162,7 +479,7 @@ render_loop(
             .type     = SPHERE,
             .sphere   = {.center = {-0.5f, -0.5f, -0.4f}, .radius = 0.51f},
             .color    = {200, 200, 200},
-            .pct_spec = 0.0f,
+            .specularity = 0.0f,
             .IOR      = 1.0f,
         },
         {
@@ -170,35 +487,45 @@ render_loop(
             .type      = SPHERE,
             .sphere    = {.center = {0.5f, -0.5f, -0.4f}, .radius = 0.51f},
             .color     = {255, 255, 255},
-            .pct_spec  = 0.9f,
+            .specularity  = 0.9f,
             .roughness = 0.0f,
             .IOR       = 1.0f,
         },
          */
         {
             // Floor
-            .type  = BOX,
-            .box   = {.min = {-1, -1.05f, -1}, .max = {1, -1, 1}},
-            .color = {255, 255, 255},
+            .type   = BOX,
+            .box    = {.min = {-1, -1, -1}, .max = {1, -1, 1}},
+            .albedo = {0.8f, 0.8f, 0.8f},
         },
+
         {
             // Left Wall
-            .type  = BOX,
-            .box   = {.min = {-1.05f, -1, -1}, .max = {-1, 1, 1}},
-            .color = {255, 0, 0},
+            .type   = BOX,
+            .box    = {.min = {-1, -1, -1}, .max = {-1, 1, 1}},
+            .albedo = {0.8f, 0.4f, 0.4f},
         },
         {
             // Back Wall
-            .type  = BOX,
-            .box   = {.min = {-1, -1, -1.05f}, .max = {1, 1, -1}},
-            .color = {255, 255, 255},
+            .type   = BOX,
+            .box    = {.min = {-1, -1, -1}, .max = {1, 1, -1}},
+            .albedo = {0.8f, 0.8f, 0.8f},
         },
         {
             // Right Wall
-            .type  = BOX,
-            .box   = {.min = {1, -1, -1}, .max = {1.05f, 1, 1}},
-            .color = {0, 255, 0},
+            .type   = BOX,
+            .box    = {.min = {1, -1, -1}, .max = {1, 1, 1}},
+            .albedo = {0.4f, 0.8f, 0.4f},
         },
+
+        /*
+        {
+            // Front Wall
+            .type   = BOX,
+            .box    = {.min = {-1, -1, 1}, .max = {1, 1, 1.05f}},
+            .albedo = {0.8f, 0.8f, 0.8f},
+        },
+         */
         /*
         {
             // Ceiling
@@ -208,6 +535,32 @@ render_loop(
         },
          */
     };
+    /*
+    objects.push_back({
+        .type = SPHERE,
+        .sphere =
+            {
+                .center = {-0.5f, -0.5f, 0},
+                .radius = 0.5f,
+            },
+        .albedo          = {1, 1, 1},
+        .IOR             = 1.5f,
+        .specular_chance = 1.0f,
+        //        .refraction_chance = 1.0f,
+    });
+    objects.push_back({
+        .type = SPHERE,
+        .sphere =
+            {
+                .center = {0.5f, -0.5f, 0},
+                .radius = 0.5f,
+            },
+        .albedo          = {1, 1, 1},
+        .IOR             = 1.0f,
+        .specular_chance = 0.0f,
+        //        .refraction_chance = 1.0f,
+    });
+*/
 
     for (int x = 0; x < 10; x++) {
         for (int y = 0; y < 10; y++) {
@@ -215,12 +568,17 @@ render_loop(
                 .type = SPHERE,
                 .sphere =
                     {
-                        .center = {-0.9f + (float)x / 5.0f, -0.9f, -0.9f + (float)y / 5.0f},
-                        .radius = 0.1f,
+                        .center =
+                            {
+                                -0.9f + (float)x / 5.0f,
+                                -0.9f + (float)y / 5.0f,
+                                -0.5f,
+                            },
+                        .radius = 0.05f,
                     },
-                .color     = {255, 255, 255},
-                .pct_spec  = (float)x / 9.0f,
-                .roughness = (float)y / 9.0f,
+                .albedo          = {1, 1, 1},
+                .IOR             = 1.0f + (float)y / 10.0f,
+                .specular_chance = (float)x / 9.0f,
             });
         }
     }
@@ -229,6 +587,7 @@ render_loop(
     //    float y = 1000;
 
     std::vector<Light> lights{
+
         {
             .object =
                 {
@@ -236,11 +595,49 @@ render_loop(
                     //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
                     //                    0.5f}},
                     .type   = SPHERE,
-                    .sphere = {.center = {0, 10.0f, 0}, .radius = 8.0f},
-                    .color  = {255, 255, 255},
+                    .sphere = {.center = {0, 2.0f, 0}, .radius = 1.0f},
+                    .albedo = {1, 1, 1},
                 },
-            .emission = 1,
+            .emission = 4,
         },
+        /*
+        {
+            .object =
+                {
+                    //                    .type = BOX,
+                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
+                    //                    0.5f}},
+                    .type   = SPHERE,
+                    .sphere = {.center = {0, 1.0f, 0}, .radius = 0.1f},
+                    .albedo = {1, 0, 0},
+                },
+            .emission = 10,
+        },
+        {
+            .object =
+                {
+                    //                    .type = BOX,
+                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
+                    //                    0.5f}},
+                    .type   = SPHERE,
+                    .sphere = {.center = {0, 1.0f, 0}, .radius = 0.1f},
+                    .albedo = {0, 1, 0},
+                },
+            .emission = 10,
+        },
+        {
+            .object =
+                {
+                    //                    .type = BOX,
+                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
+                    //                    0.5f}},
+                    .type   = SPHERE,
+                    .sphere = {.center = {0, 1.0f, 0}, .radius = 0.1f},
+                    .albedo = {0, 0, 1},
+                },
+            .emission = 10,
+        },
+         */
         /*
         {
             .object =
@@ -302,6 +699,30 @@ render_loop(
     std::vector<Light> lights;
     */
 
+    // TODO what if there are no objects?
+    std::vector<std::pair<cl_float3, cl_float3>> bounds;
+    bounds.reserve(objects.size() + lights.size());
+    for (auto &o : objects) {
+        bounds.push_back(object_bounds(o));
+    }
+    for (auto &l : lights) {
+        bounds.push_back(object_bounds(l.object));
+    }
+
+    auto [lb, ub] = bounds.front();
+    for (auto it = bounds.begin() + 1; it != bounds.end(); it++) {
+        lb = min(lb, it->first);
+        ub = max(ub, it->second);
+    }
+
+    std::vector<cl_uint> indices(bounds.size());
+    std::iota(indices.begin(), indices.end(), 0);
+
+    std::vector<KDTreeNode> nodes;
+    std::vector<cl_uint>    prim_ids;
+
+    generate_kd(lb, ub, 0, std::move(indices), bounds, nodes, prim_ids);
+
     std::string kernel_code;
     {
         auto file = std::ifstream("clpt/src/kernel.cl");
@@ -351,6 +772,15 @@ render_loop(
         renderer.setKernelArg(8, sizeof(val), &val);
     }
 
+    renderer.setKernelArg(9, sizeof(lb), &lb);
+    renderer.setKernelArg(10, sizeof(ub), &ub);
+
+    renderer.addInputBuffer(11, nodes.size() * sizeof(*nodes.data()));
+    renderer.writeBuffer(11, nodes.size() * sizeof(*nodes.data()), nodes.data());
+
+    renderer.addInputBuffer(12, prim_ids.size() * sizeof(*prim_ids.data()));
+    renderer.writeBuffer(12, prim_ids.size() * sizeof(*prim_ids.data()), prim_ids.data());
+
     int frame = 0;
 
     std::vector<float> frames(120, 0);
@@ -370,6 +800,23 @@ render_loop(
 
             //            objects[1].IOR = 2 + (cl_float)cos(GLFW::get_time());
             //            renderer.writeBuffer(5, objects.size() * sizeof(Object), objects.data());
+
+            //            lights[0].object.sphere.center = {
+            //                (float)cos(GLFW::get_time()) / 10,
+            //                1.0f,
+            //                (float)sin(GLFW::get_time()) / 10,
+            //            };
+            //            lights[1].object.sphere.center = {
+            //                (float)cos(GLFW::get_time() + 2 * glm::pi<float>() / 3),
+            //                0.0f,
+            //                (float)sin(GLFW::get_time() + 2 * glm::pi<float>() / 3),
+            //            };
+            //            lights[2].object.sphere.center = {
+            //                (float)cos(GLFW::get_time() - 2 * glm::pi<float>() / 3) / 10,
+            //                1.0f,
+            //                (float)sin(GLFW::get_time() - 2 * glm::pi<float>() / 3) / 10,
+            //            };
+            //            renderer.writeBuffer(7, lights.size() * sizeof(Light), lights.data());
 
             frame++;
 

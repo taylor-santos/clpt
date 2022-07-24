@@ -21,6 +21,12 @@
 
 #pragma pack(push, 1)
 
+#if !defined(KERNEL_PROGRAM)
+#    define DEFAULT(...) = {__VA_ARGS__}
+#else
+#    define DEFAULT(...)
+#endif
+
 typedef struct Sphere {
     cl_float3 center;
     cl_float  radius;
@@ -42,15 +48,39 @@ typedef struct Object {
         Sphere sphere;
         Box    box;
     };
-    cl_uchar3 color;
-    float     pct_spec; // Percentage of specular reflection
-    float     roughness;
-    float     IOR;
+    cl_float3 albedo DEFAULT(1, 1, 1);
+
+    float IOR DEFAULT(1.0f);
+
+    float specular_chance    DEFAULT(0);
+    float specular_roughness DEFAULT(0);
+    cl_float3 specular_color DEFAULT(1, 1, 1);
+
+    float refraction_chance         DEFAULT(0);
+    float refraction_roughness      DEFAULT(0);
+    cl_float3 refraction_absorption DEFAULT(0, 0, 0);
 } Object;
 
 typedef struct Light {
     Object   object;
     cl_float emission;
 } Light;
+
+#define MAX_KD_DEPTH 14
+
+typedef struct KDTreeNode {
+    union {
+        cl_float split;           // If interior node, split location
+        cl_uint  one_prim;        // If leaf with one primitive, index of that primitive
+        cl_uint  prim_ids_offset; // If leaf with multiple primitives, offset into ids array
+    };
+    union {
+        cl_uint flags;
+        cl_uint nprims;
+        cl_uint above_child;
+    };
+    cl_float3 lower_bound;
+    cl_float3 upper_bound;
+} KDTreeNode;
 
 #pragma pack(pop)

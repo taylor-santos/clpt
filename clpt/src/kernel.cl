@@ -6,10 +6,19 @@
 
 #undef KERNEL_PROGRAM
 
-__private bool *debug;
+#define MAX_DEPTH 0
 
-#define DEBUG(...) \
-    if (*debug) printf(__VA_ARGS__)
+#define DEBUG(...) /*                   \
+                   do {                 \
+                   if (ctx->debug) {    \
+                   printf(__VA_ARGS__); \
+                   }                    \
+                   } while (0) */
+
+typedef union array_vec {
+    float3 v;
+    float  a[3];
+} av;
 
 float3
 mul4x4(float4 *M, float3 X) {
@@ -46,6 +55,7 @@ ray_sphere_intersect(float3 origin, float3 dir, float3 center, float radius, flo
     if (d < 0.0f) return false;
 
     *t = -b - sqrt(d);
+    if (*t < 0.0f) *t = b - sqrt(d);
     // if (*t < 0.0f) *t = 0.0f;
     return true;
 }
@@ -96,6 +106,56 @@ ray_box_intersect(
 
     *t    = tmin;
     *norm = n;
+
+    return tmax >= max(0.0, tmin);
+}
+
+bool
+AABB_bounds(
+    float3 origin,
+    float3 inv_dir,
+    float3 box_min,
+    float3 box_max,
+    float *t_min,
+    float *t_max) {
+    // https://tavianator.com/cgit/dimension.git/tree/libdimension/bvh/bvh.c#n196
+    float tx1 = (box_min.x - origin.x) * inv_dir.x;
+    float tx2 = (box_max.x - origin.x) * inv_dir.x;
+
+    int   n    = 0;
+    float tmin = tx1;
+    if (tx2 < tmin) {
+        tmin = tx2;
+        n    = 1;
+    }
+    float tmax = max(tx1, tx2);
+
+    float ty1 = (box_min.y - origin.y) * inv_dir.y;
+    float ty2 = (box_max.y - origin.y) * inv_dir.y;
+
+    if (ty1 <= ty2 && tmin < ty1) {
+        tmin = ty1;
+        n    = 2;
+    } else if (ty2 < ty1 && tmin < ty2) {
+        tmin = ty2;
+        n    = 3;
+    }
+    tmax = min(tmax, max(ty1, ty2));
+
+    float tz1 = (box_min.z - origin.z) * inv_dir.z;
+    float tz2 = (box_max.z - origin.z) * inv_dir.z;
+
+    if (tz1 <= tz2 && tmin < tz1) {
+        tmin = tz1;
+        n    = 4;
+    } else if (tz2 < tz1 && tmin < tz2) {
+        tmin = tz2;
+        n    = 5;
+    }
+    tmax = min(tmax, max(tz1, tz2));
+
+    *t_min = tmin;
+    *t_max = tmax;
 
     return tmax >= max(0.0, tmin);
 }
@@ -192,39 +252,265 @@ fresnel_reflect_amount(float n1, float n2, float3 normal, float3 incident, float
 }
 
 bool
-intersect_object(float3 pos, float3 dir, float *t, int *side, __global __read_only Object *object) {
+intersect_object(
+    float3                       origin,
+    float3                       dir,
+    float                       *t,
+    int                         *side,
+    __global __read_only Object *object) {
     switch (object->type) {
         case SPHERE:
-            return ray_sphere_intersect(pos, dir, object->sphere.center, object->sphere.radius, t);
-        case BOX: return ray_box_intersect(pos, 1 / dir, object->box.min, object->box.max, t, side);
+            return ray_sphere_intersect(
+                origin,
+                dir,
+                object->sphere.center,
+                object->sphere.radius,
+                t);
+        case BOX:
+            return ray_box_intersect(origin, 1 / dir, object->box.min, object->box.max, t, side);
     }
 }
 
+typedef struct HitInfo {
+    float  dist;
+    float3 point;
+    float3 normal;
+    int    object_index;
+
+    __global __read_only Object *object;
+} HitInfo;
+
+typedef struct Context {
+    __global __read_only Object     *objects;
+    __read_only uint                 object_count;
+    __global __read_only Light      *lights;
+    __read_only uint                 light_count;
+    __read_only float3               lower_bound;
+    __read_only float3               upper_bound;
+    __global __read_only KDTreeNode *nodes;
+    __global __read_only cl_uint    *prim_ids;
+    tinymt64wp_t                     rand;
+    bool                             debug;
+    int                              intersection_tests;
+} Context;
+
+float
+split_pos(__global __read_only KDTreeNode *node) {
+    return node->split;
+}
+
+uint
+n_primitives(__global __read_only KDTreeNode *node) {
+    return node->nprims >> 2;
+}
+
+uint
+split_axis(__global __read_only KDTreeNode *node) {
+    return node->flags & 3;
+}
+
 bool
-intersect(
-    float3                       pos,
-    float3                       dir,
-    float                       *t,
-    int                         *id,
-    float3                      *norm,
-    int                          ignore,
-    __global __read_only Object *objects,
-    __read_only uint             object_count,
-    __global __read_only Light  *lights,
-    __read_only uint             light_count) {
+is_leaf(__global __read_only KDTreeNode *node) {
+    return (node->flags & 3) == 3;
+}
+
+uint
+above_child(__global __read_only KDTreeNode *node) {
+    return node->above_child >> 2;
+}
+
+typedef struct KDTask {
+    __global __read_only KDTreeNode *node;
+    float                            t_min;
+    float                            t_max;
+} KDTask;
+
+bool
+trace_kd(
+    float3   origin,
+    float3   dir,
+    int      ignore,
+    Context *ctx,
+    float   *hit_t,
+    int     *hit_index,
+    int     *hit_side) {
+    // https://pbr-book.org/3ed-2018/Primitives_and_Intersection_Acceleration/Kd-Tree_Accelerator
+    float3 inv_dir = 1 / dir;
+    float  t_min, t_max;
+    if (!AABB_bounds(origin, inv_dir, ctx->lower_bound, ctx->upper_bound, &t_min, &t_max)) {
+        return false;
+    }
+
+    KDTask                           tasks[MAX_KD_DEPTH];
+    int                              task_id = 0;
+    __global __read_only KDTreeNode *node    = &ctx->nodes[0];
+
+    bool did_hit = false;
+
+    while (node != NULL) {
+        if (did_hit && *hit_t < t_min) break;
+
+        if (!is_leaf(node)) {
+            uint  axis    = split_axis(node);
+            float split   = split_pos(node);
+            float t_plane = (split - (av){origin}.a[axis]) * (av){inv_dir}.a[axis];
+
+            __global __read_only KDTreeNode *first_child, *second_child;
+
+            bool below_first = ((av){origin}.a[axis] < split) ||
+                               ((av){origin}.a[axis] == split && (av){dir}.a[axis] <= 0);
+
+            if (below_first) {
+                first_child  = node + 1;
+                second_child = &ctx->nodes[above_child(node)];
+            } else {
+                first_child  = &ctx->nodes[above_child(node)];
+                second_child = node + 1;
+            }
+
+            if (t_plane > t_max || t_plane <= 0) {
+                node = first_child;
+            } else if (t_plane < t_min) {
+                node = second_child;
+            } else {
+                tasks[task_id].node  = second_child;
+                tasks[task_id].t_min = t_plane;
+                tasks[task_id].t_max = t_max;
+                task_id++;
+
+                node  = first_child;
+                t_max = t_plane;
+            }
+        } else { // Leaf node
+            float hue;
+            if (ctx->debug) hue = tinymt64_double01(&ctx->rand);
+            DEBUG(",Graphics3D[{Hue[%f],Opacity[0.2],Cuboid[{", hue);
+            DEBUG("%v3f", node->lower_bound);
+            DEBUG("},{");
+            DEBUG("%v3f", node->upper_bound);
+            DEBUG("}]}]");
+
+            DEBUG(",Graphics3D[{Hue[%f]", hue);
+
+            __global __read_only cl_uint *prim_ids;
+
+            int n_prim = n_primitives(node);
+            if (n_prim == 1) {
+                prim_ids = &node->one_prim;
+            } else {
+                prim_ids = &ctx->prim_ids[node->prim_ids_offset];
+            }
+            ctx->intersection_tests += n_prim;
+            for (int i = 0; i < n_prim; i++) {
+                uint id = prim_ids[i];
+                if (id == ignore) continue;
+                __global __read_only Object *object;
+                if (id < ctx->object_count) {
+                    object = &ctx->objects[id];
+                } else {
+                    object = &ctx->lights[id - ctx->object_count].object;
+                }
+
+                switch (object->type) {
+                    case SPHERE:
+                        DEBUG(",Sphere[{");
+                        DEBUG("%v3f", object->sphere.center);
+                        DEBUG("},%f]", object->sphere.radius);
+                        break;
+                    case BOX:
+                        DEBUG(",Cuboid[{");
+                        DEBUG("%v3f", object->box.min);
+                        DEBUG("},{");
+                        DEBUG("%v3f", object->box.max);
+                        DEBUG("}]");
+                        break;
+                }
+
+                float t;
+                int   side;
+                bool  hit = intersect_object(origin, dir, &t, &side, object);
+                if (hit && (!did_hit || t < *hit_t)) {
+                    did_hit    = true;
+                    *hit_t     = t;
+                    *hit_index = id;
+                    *hit_side  = side;
+                }
+            }
+
+            DEBUG("}]");
+
+            if (task_id > 0) {
+                task_id--;
+                node  = tasks[task_id].node;
+                t_min = tasks[task_id].t_min;
+                t_max = tasks[task_id].t_max;
+            } else {
+                break;
+            }
+        }
+    }
+
+    return did_hit;
+}
+
+bool
+intersect(float3 origin, float3 dir, int ignore, Context *ctx, HitInfo *out_info) {
+    // https://pbr-book.org/3ed-2018/Primitives_and_Intersection_Acceleration/Kd-Tree_Accelerator
+
+    float t;
+    int   index;
+    int   side;
+
+    bool did_hit = trace_kd(origin, dir, ignore, ctx, &t, &index, &side);
+
+    if (did_hit) {
+        __global Object *object = index < ctx->object_count
+                                      ? &ctx->objects[index]
+                                      : &ctx->lights[index - ctx->object_count].object;
+
+        out_info->dist         = t;
+        out_info->object_index = index;
+        out_info->point        = origin + dir * t;
+        out_info->object       = object;
+
+        switch (object->type) {
+            case SPHERE:
+                out_info->normal = normalize(out_info->point - object->sphere.center);
+                break;
+            case BOX:
+                switch (side) {
+                    case 0: out_info->normal = (float3)(-1, 0, 0); break;
+                    case 1: out_info->normal = (float3)(1, 0, 0); break;
+                    case 2: out_info->normal = (float3)(0, -1, 0); break;
+                    case 3: out_info->normal = (float3)(0, 1, 0); break;
+                    case 4: out_info->normal = (float3)(0, 0, -1); break;
+                    case 5: out_info->normal = (float3)(0, 0, 1); break;
+                }
+                out_info->normal =
+                    dot(out_info->normal, dir) < 0 ? out_info->normal : -out_info->normal;
+                break;
+        }
+        return true;
+    }
+    return false;
+}
+
+/*
+bool
+intersect(float3 pos, float3 dir, HitInfo *info, int ignore, Context *ctx) {
     bool  did_hit = false;
     float min_t;
     int   hit_index;
     int   hit_side;
 
-    for (int i = 0; i < object_count; i++) {
+    for (int i = 0; i < ctx->object_count; i++) {
         if (i == ignore) continue; // Don't re-test the surface we're reflecting off of
 
         float t;
         bool  hit;
         int   side;
 
-        hit = intersect_object(pos, dir, &t, &side, &objects[i]);
+        hit = intersect_object(pos, dir, &t, &side, &ctx->objects[i]);
 
         if (hit && (!did_hit || t < min_t)) {
             did_hit   = true;
@@ -233,56 +519,62 @@ intersect(
             hit_side  = side;
         }
     }
-    for (int i = 0; i < light_count; i++) {
-        if (i == ignore - object_count) continue;
+    for (int i = 0; i < ctx->light_count; i++) {
+        if (i == ignore - ctx->object_count) continue;
 
         float t;
         bool  hit;
         int   side;
 
-        hit = intersect_object(pos, dir, &t, &side, &lights[i].object);
+        hit = intersect_object(pos, dir, &t, &side, &ctx->lights[i].object);
 
         if (hit && (!did_hit || t < min_t)) {
             did_hit   = true;
             min_t     = t;
-            hit_index = object_count + i;
+            hit_index = ctx->object_count + i;
             hit_side  = side;
         }
     }
-    if (!did_hit) {
-        return false;
-    }
 
-    if (t) *t = min_t;
-    if (id) *id = hit_index;
+    if (!info || !did_hit) return did_hit;
 
-    if (!norm) {
-        return true;
-    }
+    __global Object *object = hit_index < ctx->object_count
+                                  ? &ctx->objects[hit_index]
+                                  : &ctx->lights[hit_index - ctx->object_count].object;
 
-    pos += dir * min_t;
+    info->dist         = min_t;
+    info->object_index = hit_index;
+    info->point        = pos + dir * min_t;
+    info->object       = object;
 
-    __global __read_only Object *object =
-        (hit_index < object_count) ? &objects[hit_index] : &lights[hit_index - object_count].object;
-
-    float3 n;
     switch (object->type) {
-        case SPHERE: n = normalize(pos - object->sphere.center); break;
+        case SPHERE: info->normal = normalize(info->point - object->sphere.center); break;
         case BOX:
             switch (hit_side) {
-                case 0: n = (float3)(-1, 0, 0); break;
-                case 1: n = (float3)(1, 0, 0); break;
-                case 2: n = (float3)(0, -1, 0); break;
-                case 3: n = (float3)(0, 1, 0); break;
-                case 4: n = (float3)(0, 0, -1); break;
-                case 5: n = (float3)(0, 0, 1); break;
+                case 0: info->normal = (float3)(-1, 0, 0); break;
+                case 1: info->normal = (float3)(1, 0, 0); break;
+                case 2: info->normal = (float3)(0, -1, 0); break;
+                case 3: info->normal = (float3)(0, 1, 0); break;
+                case 4: info->normal = (float3)(0, 0, -1); break;
+                case 5: info->normal = (float3)(0, 0, 1); break;
             }
-            n = dot(n, dir) < 0 ? n : -n;
+            info->normal = dot(info->normal, dir) < 0 ? info->normal : -info->normal;
             break;
     }
 
-    *norm = n;
     return true;
+}
+*/
+
+int
+occlusion_check(float3 origin, float3 dir, int ignore, Context *ctx) {
+    float t;
+    int   index;
+    int   side;
+
+    bool did_hit = trace_kd(origin, dir, ignore, ctx, &t, &index, &side);
+
+    return did_hit ? index : -1;
 }
 
 float3
@@ -312,11 +604,6 @@ cosine_hemisphere(float3 n, tinymt64wp_t *rand) {
     float3 u   = normalize(cross(fabs(n.x) > 0.1f ? (float3)(0, 1, 0) : (float3)(1, 0, 0), n));
     float3 v   = cross(n, u);
     return normalize(u * cos(r1) * r2s + v * sin(r1) * r2s + n * sqrt(1 - r2));
-}
-
-float3
-col(uchar3 c) {
-    return convert_float3(c) / 255.0;
 }
 
 void
@@ -364,33 +651,196 @@ typedef struct Hit {
     float3 emission;
 } Hit;
 
-#define MAX_DEPTH 2
+float3
+sample_light(float3 origin, float3 normal, int light_index, int ignore_index, Context *ctx) {
+    float3 Lo = 0;
+    float3 L  = ctx->lights[light_index].emission * ctx->lights[light_index].object.albedo;
+    float3 c  = ctx->lights[light_index].object.sphere.center;
+    float  r  = ctx->lights[light_index].object.sphere.radius;
+
+    float3 w                = c - origin;
+    float  distanceToCenter = length(w);
+    // If the light intersects a surface, and the ray hits that surface within epsilon of the edge
+    // of the light, this can cause numerical instability that leads to NaNs in the following
+    // calculations. Return the emission of the light as if the ray had hit it directly.
+    if (distanceToCenter <= r + 0.0001f) return L;
+    w                = normalize(w);
+    float  cos_theta = r / distanceToCenter;
+    float  q         = sqrt(1 - cos_theta * cos_theta);
+    float3 v, u;
+    make_orthogonal(w, &v, &u);
+
+    float3 toWorld[3] = {u, w, v};
+
+    float r0 = tinymt64_double01(&ctx->rand);
+    float r1 = tinymt64_double01(&ctx->rand);
+
+    float theta = acos(1 - r0 + r0 * q);
+    float phi   = 2 * M_PI * r1;
+
+    float3 loc = {
+        cos(phi) * sin(theta),
+        cos(theta),
+        sin(phi) * sin(theta),
+    };
+    float3 nwp = normalize(left_mul3x3(loc, toWorld));
+
+    float dotNL = dot(nwp, normal);
+    if (dotNL > 0) {
+        HitInfo light_hit;
+        if (occlusion_check(origin, nwp, ignore_index, ctx) == light_index + ctx->object_count) {
+            float pdf_xp = 1.0f / (2 * M_PI * (1.0f - q));
+            Lo += dotNL * (1.0f / pdf_xp) * L / M_PI;
+        }
+    }
+    return Lo;
+}
+
+float3
+trace_ray(float3 origin, float3 dir, int ignore_index, bool specular, int depth, Context *ctx) {
+    float3 ret        = 0;
+    float3 throughput = 1;
+
+    float hue;
+    if (ctx->debug) hue = tinymt64_double01(&ctx->rand);
+
+    while (true) {
+        HitInfo hit;
+        // if (!intersect(origin, dir, &hit, ignore_index, ctx)) {
+        if (!intersect(origin, dir, ignore_index, ctx, &hit)) {
+            DEBUG(",Graphics3D[{Hue[%f],HalfLine[{", hue);
+            DEBUG("%v3f", origin);
+            DEBUG("},{");
+            DEBUG("%v3f", dir);
+            DEBUG("}]}]");
+            float3 ambient = 0;
+            return ret + ambient * throughput; // Ambient
+        }
+        return 0;
+
+        DEBUG(",Graphics3D[{Hue[%f],Line[{{", hue);
+        DEBUG("%v3f", origin);
+        DEBUG("},{");
+        DEBUG("%v3f", hit.point);
+        DEBUG("}}]}]");
+
+        float3 hit_color = hit.object->albedo;
+
+        if (specular && hit.object_index >= ctx->object_count) {
+            // Normally, the main light path ignores direct emission contribution so as not to
+            // double-count when lights are explicitly sampled. If, however, we are on the first ray
+            // from the camera OR if we are in a specular reflection, the emission needs to be
+            // included. Otherwise, lights will look dark when viewed directly or through a specular
+            // reflection.
+            float3 hit_emission =
+                ctx->lights[hit.object_index - ctx->object_count].emission * hit_color;
+            ret += hit_emission * throughput;
+        }
+
+        float p = max(max(throughput.x, throughput.y), throughput.z);
+        if (depth <= 0 || tinymt64_double01(&ctx->rand) > p) {
+            break;
+        }
+        throughput /= p;
+
+        typedef enum HitType {
+            DIFFUSE,
+            REFLECT,
+            REFRACT,
+        } HitType;
+
+        float spec_prob = hit.object->specular_chance;
+        float refr_prob = hit.object->refraction_chance;
+
+        if (spec_prob > 0.0f) {
+            float fresnel =
+                fresnel_reflect_amount(1.0f, hit.object->IOR, dir, hit.normal, spec_prob, 1.0f);
+
+            float multiplier = (1 - fresnel) / (1 - spec_prob);
+            refr_prob *= multiplier;
+            spec_prob = fresnel;
+        }
+        float   ray_prob = 1.0f;
+        HitType hit_type = DIFFUSE;
+        {
+            float roll = tinymt64_double01(&ctx->rand);
+            if (spec_prob > 0.0f && roll < spec_prob) {
+                hit_type = REFLECT;
+                ray_prob = spec_prob;
+            } else if (refr_prob > 0.0f && roll < spec_prob + refr_prob) {
+                hit_type = REFRACT;
+                ray_prob = refr_prob;
+            } else {
+                ray_prob = 1.0f - (spec_prob + refr_prob);
+            }
+            ray_prob = max(ray_prob, 0.001f); // TODO is this necessary?
+        }
+
+        bool hit_light   = hit.object_index >= ctx->object_count;
+        int  light_count = hit_light ? ctx->light_count - 1 : ctx->light_count;
+        if (hit_type == DIFFUSE && light_count) {
+            int light_index = tinymt64_uint64(&ctx->rand) % light_count;
+            if (hit_light && light_index >= (hit.object_index - ctx->object_count)) {
+                light_index++;
+            }
+            // for (int light_index = 0; light_index < ctx->light_count; light_index++) {
+            float3 light_sample =
+                sample_light(hit.point, hit.normal, light_index, hit.object_index, ctx) *
+                light_count;
+            if (any(light_sample > 0.0f)) {
+                ret += light_sample * hit_color * throughput;
+            }
+        }
+
+        throughput /= ray_prob;
+
+        float3 diffuse_dir = cosine_hemisphere(hit.normal, &ctx->rand);
+
+        switch (hit_type) {
+            case DIFFUSE: dir = diffuse_dir; break;
+            case REFLECT: dir -= 2 * dot(dir, hit.normal) * hit.normal; break;
+            case REFRACT: return 0; // TODO
+        }
+
+        origin       = hit.point;
+        ignore_index = hit.object_index;
+        specular     = (hit_type != DIFFUSE);
+        depth--;
+        throughput *= hit_color;
+    }
+    return ret;
+}
 
 void kernel
 my_kernel(
-    __write_only image2d_t       output,
-    __global __read_only float4 *camera,
-    __global __read_only ulong  *seed,
-    __read_only int              input,
-    __read_only ulong            noise,
-    __global __read_only Object *objects,
-    __read_only uint             object_count,
-    __global __read_only Light  *lights,
-    __read_only uint             light_count) {
+    __write_only image2d_t           output,
+    __global __read_only float4     *camera,
+    __global __read_only ulong      *seed,
+    __read_only int                  input,
+    __read_only ulong                noise,
+    __global __read_only Object     *objects,
+    __read_only uint                 object_count,
+    __global __read_only Light      *lights,
+    __read_only uint                 light_count,
+    __read_only float3               lower_bound,
+    __read_only float3               upper_bound,
+    __global __read_only KDTreeNode *nodes,
+    __global __read_only cl_uint    *prim_ids) {
     int2 coord = (int2)(get_global_id(0), get_global_id(1));
     int2 res   = get_image_dim(output);
 
-    bool is_debug = false; // all(coord == res / 2);
-    debug         = &is_debug;
+    bool debug = all(coord == res / 2);
+    //    debug         = &is_debug;
 
+    /*
     if (is_debug) {
         printf("Show[");
         for (int i = 0; i < object_count; i++) {
             if (i) printf(",");
-            printf("Graphics3D[{RGBColor[");
-            printf("%v3f", col(objects[i].color));
+            printf("Graphics3D[{Opacity[0.5],RGBColor[");
+            printf("%v3f", objects[i].albedo);
             printf("],Specularity[");
-            printf("%f", objects[i].pct_spec);
+            printf("%f", objects[i].specular_chance);
             printf("],");
             switch (objects[i].type) {
                 case SPHERE:
@@ -412,9 +862,9 @@ my_kernel(
         for (int i = 0; i < light_count; i++) {
             if (i || object_count) printf(",");
             printf("Graphics3D[{Glow[RGBColor[");
-            printf("%v3f", col(lights[i].object.color) * lights[i].emission);
+            printf("%v3f", lights[i].object.albedo * lights[i].emission);
             printf("]],Specularity[");
-            printf("%f", lights[i].object.pct_spec);
+            printf("%f", lights[i].object.specular_chance);
             printf("],");
             switch (lights[i].object.type) {
                 case SPHERE:
@@ -434,601 +884,70 @@ my_kernel(
             printf("}]");
         }
     }
-
-    /*
-    if (debug) printf("START\n");
-
-    if (debug) {
-        printf("Show[");
-        for (int i = 0; i < object_count; i++) {
-            if (i) printf(",");
-            printf("Graphics3D[");
-            switch(objects[i].type) {
-                case SPHERE:
-                    printf("Sphere[{");
-                    printf("%v3f", objects[i].sphere.center);
-                    printf("},%f]", objects[i].sphere.radius);
-                    break;
-                case BOX:
-                    printf("Cuboid[{");
-                    printf("%v3f", objects[i].box.min);
-                    printf("},{");
-                    printf("%v3f", objects[i].box.max);
-                    printf("}]");
-                    break;
-            }
-            printf("]");
-        }
-    }
      */
 
-    tinymt64wp_t rand = {0};
-    tinymt64_init(&rand, seed[coord.x + coord.y * res.x] + noise);
+    Context ctx = {
+        objects,
+        object_count,
+        lights,
+        light_count,
+        lower_bound,
+        upper_bound,
+        nodes,
+        prim_ids,
+        {0},
+        debug,
+        0,
+    };
+
+    tinymt64_init(&ctx.rand, seed[coord.x + coord.y * res.x] + noise);
 
     float3 color   = 0;
     int    samples = 0;
     do {
-        float3 pos, dir;
+        float3 origin, dir;
         {
             float2 sample = (float2){
-                (float)coord.x + tinymt64_double01(&rand),
-                (float)coord.y + tinymt64_double01(&rand),
+                (float)coord.x + tinymt64_double01(&ctx.rand),
+                (float)coord.y + tinymt64_double01(&ctx.rand),
             };
             float2 rat = 2 * (sample / convert_float2(res)) - 1;
             float3 fcp = mul4x4(camera, (float3)(rat, 1.0f));
 
-            pos = (float3){camera[0].z, camera[1].z, camera[2].z} / camera[3].z;
-            dir = normalize((fcp - pos).xyz);
+            origin = (float3){camera[0].z, camera[1].z, camera[2].z} / camera[3].z;
+            dir    = normalize((fcp - origin).xyz);
         }
 
-        DEBUG(",Graphics3D[{Hue[%f],", tinymt64_double01(&rand));
-
-        Hit hits[MAX_DEPTH];
-        int last_hit_index = -1;
-        int depth;
-        // If last hit was a specular reflection, or if it's our first ray, collect the next hits
-        // emission directly. Otherwise, light sources will look dark when viewed directly or
-        // through a specular reflection.
-        bool last_specular = true;
-        for (depth = 0; depth < MAX_DEPTH; depth++) {
-            float  min_t;
-            int    hit_index;
-            float3 n;
-            if (!intersect(
-                    pos,
-                    dir,
-                    &min_t,
-                    &hit_index,
-                    &n,
-                    last_hit_index,
-                    objects,
-                    object_count,
-                    lights,
-                    light_count)) {
-                hits[depth].color    = 1;
-                hits[depth].emission = 0;
-                depth++;
-                break;
-            }
-
-            last_hit_index = hit_index;
-
-            __global __read_only Object *object = (hit_index < object_count)
-                                                      ? &objects[hit_index]
-                                                      : &lights[hit_index - object_count].object;
-
-            float3 hit_color = col(object->color);
-
-            hits[depth].emission = (hit_index < object_count) ? 0
-                                   // : lights[hit_index - object_count].emission * hit_color;
-                                   : last_specular
-                                       ? lights[hit_index - object_count].emission * hit_color
-                                       : 0;
-
-            last_specular = false;
-
-            DEBUG(",Line[{{");
-            DEBUG("%v3f", pos);
-            DEBUG("}");
-
-            pos += dir * min_t;
-
-            DEBUG(",{");
-            DEBUG("%v3f", pos);
-            DEBUG("}}]");
-
-            float spec_prob = object->pct_spec;
-            //            if (spec_prob > 0.0f) {
-            //                spec_prob = fresnel_reflect_amount(1.0f, object->IOR, dir, n,
-            //                spec_prob, 1.0f);
-            //            }
-            bool diffuse = spec_prob < tinymt64_double01(&rand);
-
-            if (diffuse) {
-                float3 Lo = 0;
-                for (int index = 0; index < light_count; index++) {
-                    float3 L = lights[index].emission * col(lights[index].object.color);
-                    float3 c = lights[index].object.sphere.center;
-                    float  r = lights[index].object.sphere.radius;
-
-                    float3 o = pos;
-
-                    float3 w                = c - o;
-                    float  distanceToCenter = length(w);
-                    w                       = normalize(w);
-                    float  cos_theta        = r / distanceToCenter;
-                    float  q                = sqrt(1 - cos_theta * cos_theta);
-                    float3 v, u;
-                    make_orthogonal(w, &v, &u);
-
-                    //                if (is_debug) {
-                    //                    printf(",Line[{{");
-                    //                    printf("%v3f", o);
-                    //                    printf("},{");
-                    //                    printf("%v3f", o + w * 0.1f);
-                    //                    printf("}}]");
-                    //                    printf(",Line[{{");
-                    //                    printf("%v3f", o);
-                    //                    printf("},{");
-                    //                    printf("%v3f", o + v * 0.1f);
-                    //                    printf("}}]");
-                    //                    printf(",Line[{{");
-                    //                    printf("%v3f", o);
-                    //                    printf("},{");
-                    //                    printf("%v3f", o + u * 0.1f);
-                    //                    printf("}}]");
-                    //                }
-
-                    float3 toWorld[3] = {u, w, v};
-
-                    float r0 = tinymt64_double01(&rand);
-                    float r1 = tinymt64_double01(&rand);
-
-                    float theta = acos(1 - r0 + r0 * q);
-                    float phi   = 2 * M_PI * r1;
-
-                    float3 loc = {
-                        cos(phi) * sin(theta),
-                        cos(theta),
-                        sin(phi) * sin(theta),
-                    };
-                    float3 nwp = normalize(left_mul3x3(loc, toWorld));
-
-                    if (dot(nwp, n) > 0) {
-                        float dist;
-                        int   id;
-                        if (intersect(
-                                o,
-                                nwp,
-                                &dist,
-                                &id,
-                                NULL,
-                                hit_index,
-                                objects,
-                                object_count,
-                                lights,
-                                light_count)) {
-                            if (id == index + object_count) {
-                                if (is_debug) {
-                                    printf(",Line[{{");
-                                    printf("%v3f", o);
-                                    printf("},{");
-                                    printf("%v3f", o + nwp * dist);
-                                    printf("}}]");
-                                }
-                                float dotNL = clamp(dot(nwp, n), 0.0f, 1.0f);
-                                if (dotNL > 0) {
-                                    float pdf_xp = 1.0f / (2 * M_PI * (1.0f - q));
-                                    Lo += dotNL * (1.0f / pdf_xp) * L / M_PI;
-                                }
-                            } else {
-                                if (is_debug) {
-                                    printf(",HalfLine[{");
-                                    printf("%v3f", o);
-                                    printf("},{");
-                                    printf("%v3f", nwp);
-                                    printf("}]");
-                                }
-                            }
-                        } else {
-                            if (is_debug) {
-                                printf(",HalfLine[{");
-                                printf("%v3f", o);
-                                printf("},{");
-                                printf("%v3f", nwp);
-                                printf("}]");
-                            }
-                        }
-                    }
-                }
-                Lo /= light_count;
-                hits[depth].emission += hit_color * Lo;
-            }
-            /*
-            bool cond = false;
-            for (int i = 0; i < light_count; i++) {
-                if (lights[i].object.type != SPHERE) continue;
-                float3 x         = pos;
-                float  sr        =
-            lights[i].object.sphere.radius; float3 sp        =
-            lights[i].object.sphere.center; float3 sw        = sp
-            - x; float3 su        = normalize(cross((float3)(0,
-            1, 0), sw)); float3 sv        = cross(sw, su); float
-            cos_a_max = sqrt(1 - sr * sr / dot(x - sp, x - sp));
-                float  eps1      = tinymt64_double01(&rand);
-                float  eps2      = tinymt64_double01(&rand);
-                float  cos_a     = 1 - eps1 + eps1 * cos_a_max;
-                float  sin_a     = sqrt(1 - cos_a * cos_a);
-                float  phi       = 2 * M_PI * eps2;
-
-                float3 l = normalize(su * cos(phi) * sin_a + sv *
-            sin(phi) * sin_a + sw * cos_a);
-
-                int index;
-                if (intersect(
-                        pos,
-                        l,
-                        0,
-                        &index,
-                        0,
-                        hit_index,
-                        objects,
-                        object_count,
-                        lights,
-                        light_count) &&
-                    index == object_count + i) {
-                    float omega = 2 * M_PI * (1 - cos_a_max);
-                    hits[depth].emission +=
-            col(objects[hit_index].color) * lights[i].emission *
-                                            col(lights[i].object.color)
-            * dot(l, n) * M_1_PI;
-                }
-
-                //
-                float3 p;
-                switch (objects[i].type) {
-                    case SPHERE:
-                        p = objects[i].sphere.center +
-                            random_in_sphere(&rand) *
-            objects[i].sphere.radius; break; case BOX: p =
-            random_in_box(objects[i].box.min, objects[i].box.max,
-            &rand); break;
-                }
-                float3 d = normalize(p - pos);
-                if (dot(d, n) < 0) continue;
-
-                int index;
-                if (intersect(pos, d, 0, &index, 0, hit_index,
-            objects, object_count) && index == i) { cond     =
-            true; float3 e = objects[i].emission *
-            convert_float3(objects[i].color) / 255.0;
-                    hits[depth].emission += dot(d, n) * e;
-                }
-                 */
-            //}
-
-            /*
-            float p =
-                1 - ((float)(depth * depth) /
-                     (float)((MAX_DEPTH - 1) * (MAX_DEPTH - 1))); // max(max(hit_color.x,
-                                                                  // hit_color.y), hit_color.z);
-            if (!p) {
-                if (tinymt64_double01(&rand) < p) {
-                    hit_color = hit_color * (1 / p);
-                } else {
-                    break;
-                }
-            }
-
-             */
-
-            hits[depth].color = hit_color;
-
-            float3 diffuse_dir = cosine_hemisphere(n, &rand);
-            if (diffuse) {
-                dir = diffuse_dir;
-            } else {
-                dir -= 2 * dot(dir, n) * n;
-                if (object->roughness > 0) {
-                    dir += (diffuse_dir - dir) * object->roughness;
-                }
-                last_specular = true;
-            }
-
-            /*
-            // Uniform hemisphere distribution
-            {
-                float z = tinymt64_double01(&rand);
-                float p = tinymt64_double01(&rand) * 2 * M_PI;
-                float r = sqrt(1 - z * z);
-                dir     = (float3){
-                        r * cos(p),
-                        r * sin(p),
-                        z,
-                };
-                if (dot(dir, n) < 0) dir = -dir;
-            }
-            hits[depth].color *= 2 * dot(dir, n);
-            */
-
-            /*
-            // Cosine-weighted hemisphere distribution
-            dir = cosine_hemisphere(n, &rand);
-             */
-
-            /*
-            if (object->pct_spec) {
-                dir -= 2 * dot(dir, n) * n;
-                last_specular = true;
-            } else {
-                dir = cosine_hemisphere(n, &rand);
-            }
-            */
-            /*
-            float3 diff       = cosine_hemisphere(n, &rand);
-            float  spec       = object->pct_spec;
-            if (spec > 0.0f) {
-                spec = fresnel_reflect_amount(1.0f, object->IOR,
-            dir, n, spec, 1.0f);
-            }
-            if (spec == 1.0 || (0 < spec &&
-            tinymt64_double01(&rand) <= spec)) {
-                // Specular reflection
-                dir -= 2 * dot(dir, n) * n;
-                if (object->roughness > 0) {
-                    dir += (diff - dir) * object->roughness;
-                }
-                last_specular = true;
-                //                dir = random_hemisphere(dir,
-            &rand, input / 100.0f); } else {
-                // Diffuse reflection
-                dir = diff;
-            }
-             */
-
-            //            dir -= 2 * dot(dir, n) * n;
-            //            dir = random_hemisphere(dir, &rand,
-            //            input / 100.0f);
-            // dir               = cosine_hemisphere(n, &rand);
-
-            // dir               = random_hemisphere(n, &rand);
-            // hits[depth].color = 2 * hit_color * dot(dir, n);
-
-            /*
-            if (object->type == BOX || true) {
-                float  r1  = 2 * M_PI * tinymt64_double01(&rand);
-                float  r2  = tinymt64_double01(&rand);
-                float  r2s = sqrt(r2);
-                float3 w   = n;
-                float3 u =
-                    normalize(cross(fabs(w.x) > 0.1f ?
-            (float3)(0, 1, 0) : (float3)(1, 0, 0), w)); float3 v
-            = cross(w, u); dir      = normalize(u * cos(r1) * r2s
-            + v * sin(r1) * r2s + w * sqrt(1 - r2)); } else { n =
-            random_hemisphere(n, &rand, 0.1f); dir -= 2 *
-            dot(dir, n) * n;
-            }
-            */
+        float3 new_color = 0;
+        {
+            int  ignore_index      = -1;
+            bool specular          = true;
+            ctx.intersection_tests = 0;
+            new_color   = trace_ray(origin, dir, ignore_index, specular, MAX_DEPTH, &ctx);
+            new_color.x = ctx.intersection_tests / 25.5;
         }
-
-        DEBUG("}]");
-        depth--;
-        float3 new_color = hits[depth].emission * hits[depth].color;
-        for (depth--; depth >= 0; depth--) {
-            new_color *= hits[depth].color;
-            new_color += hits[depth].emission;
-        }
-        color += new_color;
-
-        // color += hits[0].emission;
 
         /*
-        double hue = tinymt64_double01(&rand);
-
-        float3 ray_color = 1;
-
-        if (debug) {
-            printf(",Graphics3D[{Hue[%f],Line[{{", hue);
-            printf("%v3f", pos);
+        if (is_debug) {
+            printf(",Graphics3D[{Hue[%f],Line[{{", tinymt64_double01(&ctx.rand));
+            printf("%v3f", origin);
             printf("}");
-        }
-
-        bool did_hit;
-        int last_hit_index = -1;
-        do {
-            did_hit = false;
-
-            float min_t;
-            int   hit_index;
-            int   hit_side;
-
-            for (int k = 0; k < object_count; k++) {
-                if (last_hit_index != -1 && k == last_hit_index) {
-                   continue; // Don't re-test the surface we're reflecting off of
-                }
-                float t;
-                bool  hit = false;
-                int side;
-                switch (objects[k].type) {
-                    case SPHERE:
-                        hit = ray_sphere_intersect(
-                            pos,
-                            dir,
-                            objects[k].sphere.center,
-                            objects[k].sphere.radius,
-                            &t);
-                        break;
-                    case BOX:
-                        hit = ray_box_intersect(
-                            pos,
-                            1 / dir,
-                            objects[k].box.min,
-                            objects[k].box.max,
-                            &t,
-                            &side);
-                        break;
-                }
-                if (hit && (!did_hit || t < min_t)) {
-                    min_t   = t;
-                    did_hit = true;
-                    hit_index = k;
-                    hit_side = side;
-                }
+            for (int i = 0; i <= *hit_depth; i++) {
+                printf(",{");
+                printf("%v3f", points[i]);
+                printf("}");
             }
-            if (did_hit) {
-                last_hit_index = hit_index;
-                pos += dir * min_t;
-                if (debug) {
-                    printf(",{");
-                    printf("%v3f", pos);
-                    printf("}");
-                }
-                float3 n;
-                switch (objects[hit_index].type) {
-                    case SPHERE:
-                        n = normalize(pos - objects[hit_index].sphere.center);
-                        break;
-                    case BOX:
-                        switch(hit_side) {
-                            case 0: n = (float3)(-1,  0,  0); break;
-                            case 1: n = (float3)( 1,  0,  0); break;
-                            case 2: n = (float3)( 0, -1,  0); break;
-                            case 3: n = (float3)( 0,  1,  0); break;
-                            case 4: n = (float3)( 0,  0, -1); break;
-                            case 5: n = (float3)( 0,  0,  1); break;
-                        }
-                        break;
-                }
-                dir -= 2 * dot(dir, n) * n;
-                pos += dir *0.0001;
-
-                float3 hit_color = convert_float3(objects[hit_index].color) / 255.0;
-                ray_color *= hit_color;
-            }
-        } while (did_hit);
-        if (debug) {
-            printf("}]}],");
-            printf("Graphics3D[{Hue[%f],HalfLine[{", hue);
-            printf("%v3f", pos);
-            printf("},{");
-            printf("%v3f", dir);
             printf("}]}]");
         }
          */
-        /*
-        if (ray_sphere_intersect(pos, dir, center, r, &t)) {
-            if (debug) {
-                printf(",\n");
-                printf(" Graphics3D[{\n");
-                printf("  Hue[%f],\n", hue);
-                printf("  Line[{\n");
-                printf("   {%f, %f, %f},\n", pos.x, pos.y, pos.z);
-                float3 new_pos = pos + dir*t;
-                printf("   {%f, %f, %f}\n", new_pos.x, new_pos.y, new_pos.z);
-                printf("  }]\n");
-                printf(" }]\n");
-            }
 
-            pos += dir * t;
-            float3 n = normalize(pos - center);
-            float n1 = 1, n2 = 1 + (input/10.0f);
-            bool in = false;
-            int iter = 0;
-
-            do {
-                float3 rand_n = n;
-                float prob = FresnelReflectAmount(n1, n2, rand_n, dir, 0, 1);
-                bool is_reflection = tinymt64_double01(&rand) <= prob;
-                if (is_reflection) {
-                    dir -= 2 * dot(dir, rand_n) * rand_n;
-                } else {
-                    dir = snell(dir, rand_n, n1, n2);
-                    n = -n;
-                    {
-                        float tmp = n1;
-                        n1 = n2;
-                        n2 = tmp;
-                    }
-                    in = !in;
-                }
-
-                if (in) {
-                    float t = 2 * r * dot(n, dir) / dot(dir, dir);
-
-                    if (debug) {
-                        printf(",\n");
-                        printf(" Graphics3D[{\n");
-                        printf("  Hue[%f],\n", hue);
-                        printf("  Line[{\n");
-                        printf("   {%f, %f, %f},\n", pos.x, pos.y, pos.z);
-                    }
-
-                    pos += dir * t;
-                    n = normalize(center - pos);
-
-                    if (debug) {
-                        printf("   {%f, %f, %f}\n", pos.x, pos.y, pos.z);
-                        printf("  }]\n");
-                        printf(" }]\n");
-                    }
-                } else {
-                    if (debug) {
-                        printf(",\n");
-                        printf(" Graphics3D[{\n");
-                        printf("  Hue[%f],\n", hue);
-                        printf("  HalfLine[\n");
-                        printf("   {%f, %f, %f},\n", pos.x, pos.y, pos.z);
-                        printf("   {%f, %f, %f}\n", dir.x, dir.y, dir.z);
-                        printf("  ]\n");
-                        printf(" }]\n");
-                    }
-                }
-
-                iter++;
-            } while(in && iter < 10);
-        }
-         */
-        /*
-        float a = atan2(dir.z, dir.x) + M_PI;
-        float b = atan2(dir.y, sqrt(dir.x * dir.x + dir.z * dir.z)) + M_PI;
-        if (fmod(a, (float)M_PI / 100.0f) < 0.001f || fmod(b, (float)M_PI / 100.0f) < 0.001f) {
-            color += 0;
-        } else {
-            color += ray_color;
-        }
-         */
-        //        color += trace_path(pos, dir, 0, -1, &rand, objects, object_count, 1, debug);
+        color += new_color;
         samples++;
     } while (samples < input);
+
     color /= samples;
-    if (is_debug) {
-        if (light_count) {
-            printf(",Lighting->{");
-            for (int i = 0; i < light_count; i++) {
-                if (i) printf(",");
-                printf("{\"Point\",RGBColor[");
-                printf("%v3f", col(lights[i].object.color) * lights[i].emission);
-                printf("],{");
-                switch (objects[i].type) {
-                    case SPHERE: printf("%v3f", lights[i].object.sphere.center); break;
-                    case BOX:
-                        printf("%v3f", (lights[i].object.box.min + lights[i].object.box.max) / 2);
-                        break;
-                }
-                printf("}}");
-            }
-            printf("}");
-        }
-        printf("]\n\n");
-        color = (float3)(1, 0, 0);
+    if (ctx.debug) {
+        color = (float3){1, 0, 0};
     }
-    /*
-    if (input % 2) {
-        float  exposure_bias = 2.0f;
-        float3 curr          = hable(color * exposure_bias);
-        float3 W             = 11.2f;
-        float3 white_scale   = 1 / hable(W);
-        color                = curr * white_scale;
-    }*/
     write_imagef(output, coord, (float4)(color, 1.0f));
 }
