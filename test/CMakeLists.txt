@@ -4,8 +4,7 @@ enable_testing()
 set(TEST_NAME
         ${PROJECT_NAME}_tests)
 
-set(TEST_SRC
-        test_clpt.cpp) # Add test_*.cpp sources here
+set(TEST_SRC) # Add test_*.cpp sources here
 
 add_executable(${TEST_NAME}
         test_main.cpp

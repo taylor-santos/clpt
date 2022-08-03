@@ -4,6 +4,8 @@
 
 #pragma once
 
+#define MAX_KD_DEPTH 6
+
 #if defined(KERNEL_PROGRAM)
 #    if !defined(cl_float3)
 #        define cl_float3 float3
@@ -48,7 +50,8 @@ typedef struct Object {
         Sphere sphere;
         Box    box;
     };
-    cl_float3 albedo DEFAULT(1, 1, 1);
+    cl_float3 albedo   DEFAULT(1, 1, 1);
+    cl_float3 emission DEFAULT(0, 0, 0);
 
     float IOR DEFAULT(1.0f);
 
@@ -62,11 +65,8 @@ typedef struct Object {
 } Object;
 
 typedef struct Light {
-    Object   object;
-    cl_float emission;
+    cl_uint index;
 } Light;
-
-#define MAX_KD_DEPTH 14
 
 typedef struct KDTreeNode {
     union {

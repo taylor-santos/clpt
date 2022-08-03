@@ -76,7 +76,7 @@ ThreadSafe<Camera>                             shared_camera;
 ThreadSafe<bool>                               cursor_locked = false;
 ThreadSafe<glm::vec2>                          shared_velocity;
 ThreadSafe<glm::vec2>                          sensitivity{1, 1};
-ThreadSafe<int>                                input = 1;
+ThreadSafe<int>                                input = 10;
 
 bool                           fullscreen = false;
 std::tuple<int, int, int, int> windowed_dim;
@@ -517,6 +517,12 @@ render_loop(
             .box    = {.min = {1, -1, -1}, .max = {1, 1, 1}},
             .albedo = {0.4f, 0.8f, 0.4f},
         },
+        {
+            .type     = SPHERE,
+            .sphere   = {.center = {0, 1.5f, 0}, .radius = 0.5f},
+            .albedo   = {1, 1, 1},
+            .emission = {10, 10, 10},
+        },
 
         /*
         {
@@ -535,178 +541,12 @@ render_loop(
         },
          */
     };
-    /*
-    objects.push_back({
-        .type = SPHERE,
-        .sphere =
-            {
-                .center = {-0.5f, -0.5f, 0},
-                .radius = 0.5f,
-            },
-        .albedo          = {1, 1, 1},
-        .IOR             = 1.5f,
-        .specular_chance = 1.0f,
-        //        .refraction_chance = 1.0f,
-    });
-    objects.push_back({
-        .type = SPHERE,
-        .sphere =
-            {
-                .center = {0.5f, -0.5f, 0},
-                .radius = 0.5f,
-            },
-        .albedo          = {1, 1, 1},
-        .IOR             = 1.0f,
-        .specular_chance = 0.0f,
-        //        .refraction_chance = 1.0f,
-    });
-*/
-
-    for (int x = 0; x < 10; x++) {
-        for (int y = 0; y < 10; y++) {
-            objects.push_back({
-                .type = SPHERE,
-                .sphere =
-                    {
-                        .center =
-                            {
-                                -0.9f + (float)x / 5.0f,
-                                -0.9f + (float)y / 5.0f,
-                                -0.5f,
-                            },
-                        .radius = 0.05f,
-                    },
-                .albedo          = {1, 1, 1},
-                .IOR             = 1.0f + (float)y / 10.0f,
-                .specular_chance = (float)x / 9.0f,
-            });
-        }
-    }
-
-    //    float a = glm::radians(45.0f);
-    //    float y = 1000;
-
-    std::vector<Light> lights{
-
-        {
-            .object =
-                {
-                    //                    .type = BOX,
-                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
-                    //                    0.5f}},
-                    .type   = SPHERE,
-                    .sphere = {.center = {0, 2.0f, 0}, .radius = 1.0f},
-                    .albedo = {1, 1, 1},
-                },
-            .emission = 4,
-        },
-        /*
-        {
-            .object =
-                {
-                    //                    .type = BOX,
-                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
-                    //                    0.5f}},
-                    .type   = SPHERE,
-                    .sphere = {.center = {0, 1.0f, 0}, .radius = 0.1f},
-                    .albedo = {1, 0, 0},
-                },
-            .emission = 10,
-        },
-        {
-            .object =
-                {
-                    //                    .type = BOX,
-                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
-                    //                    0.5f}},
-                    .type   = SPHERE,
-                    .sphere = {.center = {0, 1.0f, 0}, .radius = 0.1f},
-                    .albedo = {0, 1, 0},
-                },
-            .emission = 10,
-        },
-        {
-            .object =
-                {
-                    //                    .type = BOX,
-                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
-                    //                    0.5f}},
-                    .type   = SPHERE,
-                    .sphere = {.center = {0, 1.0f, 0}, .radius = 0.1f},
-                    .albedo = {0, 0, 1},
-                },
-            .emission = 10,
-        },
-         */
-        /*
-        {
-            .object =
-                {
-                    .type = SPHERE,
-                    .sphere =
-                        {
-                            .center = {0, y, 0},
-                            .radius = y * glm::sin(a),
-                        },
-                    .color = {255, 0, 0},
-                },
-            .emission = 1,
-        },
-        {
-            .object =
-                {
-                    //                    .type = BOX,
-                    //                    .box  = {.min = {-0.5f, 0.9f, -0.5f}, .max = {0.5f, 1.1f,
-                    //                    0.5f}},
-                    .type   = SPHERE,
-                    .sphere = {.center = {0, 2, 0}, .radius = 1.1f},
-                    .color  = {255, 255, 255},
-                },
-            .emission = 6,
-        },*/
-
-    };
-    /*
-    std::vector<Object> objects{
-       {
-           .type = SPHERE,
-           .sphere =
-               {
-                   .center = {0, 0, 0},
-                   .radius = 0.5f,
-               },
-           .color = {255, 255, 255},
-       },
-       {
-           .type = SPHERE,
-           .sphere =
-               {
-                   .center = {2, 0, 0},
-                   .radius = 0.5f,
-               },
-           .color = {255, 255, 255},
-       },
-       {
-           .type = SPHERE,
-           .sphere =
-               {
-                   .center = {1, 0, -5},
-                   .radius = 0.5f,
-               },
-           .color = {255, 0, 0},
-       },
-    };
-    std::vector<Light> lights;
-    */
 
     // TODO what if there are no objects?
     std::vector<std::pair<cl_float3, cl_float3>> bounds;
-    bounds.reserve(objects.size() + lights.size());
+    bounds.reserve(objects.size());
     for (auto &o : objects) {
         bounds.push_back(object_bounds(o));
-    }
-    for (auto &l : lights) {
-        bounds.push_back(object_bounds(l.object));
     }
 
     auto [lb, ub] = bounds.front();
@@ -759,6 +599,16 @@ render_loop(
     {
         auto val = static_cast<unsigned int>(objects.size());
         renderer.setKernelArg(6, sizeof(val), &val);
+    }
+
+    auto lights = std::vector<Light>();
+    for (size_t i = 0; i < objects.size(); i++) {
+        auto &obj = objects[i];
+        if (obj.emission.x > 0 || obj.emission.y > 0 || obj.emission.z > 0) {
+            lights.emplace_back(Light{
+                .index = static_cast<cl_uint>(i),
+            });
+        }
     }
 
     if (!lights.empty()) {

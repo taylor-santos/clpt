@@ -5,7 +5,6 @@ set(LIB_NAME
         ${PROJECT_NAME}_lib)
 
 set(BUILD_SRC
-        src/clpt.cpp
         src/glfwcpp.cpp
         src/render.cpp
         src/transform.cpp

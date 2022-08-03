@@ -6,14 +6,7 @@
 
 #undef KERNEL_PROGRAM
 
-#define MAX_DEPTH 0
-
-#define DEBUG(...) /*                   \
-                   do {                 \
-                   if (ctx->debug) {    \
-                   printf(__VA_ARGS__); \
-                   }                    \
-                   } while (0) */
+#define MAX_DEPTH 6
 
 typedef union array_vec {
     float3 v;
@@ -290,7 +283,6 @@ typedef struct Context {
     __global __read_only KDTreeNode *nodes;
     __global __read_only cl_uint    *prim_ids;
     tinymt64wp_t                     rand;
-    bool                             debug;
     int                              intersection_tests;
 } Context;
 
@@ -382,62 +374,39 @@ trace_kd(
                 t_max = t_plane;
             }
         } else { // Leaf node
-            float hue;
-            if (ctx->debug) hue = tinymt64_double01(&ctx->rand);
-            DEBUG(",Graphics3D[{Hue[%f],Opacity[0.2],Cuboid[{", hue);
-            DEBUG("%v3f", node->lower_bound);
-            DEBUG("},{");
-            DEBUG("%v3f", node->upper_bound);
-            DEBUG("}]}]");
-
-            DEBUG(",Graphics3D[{Hue[%f]", hue);
-
-            __global __read_only cl_uint *prim_ids;
-
             int n_prim = n_primitives(node);
+
             if (n_prim == 1) {
-                prim_ids = &node->one_prim;
-            } else {
-                prim_ids = &ctx->prim_ids[node->prim_ids_offset];
-            }
-            ctx->intersection_tests += n_prim;
-            for (int i = 0; i < n_prim; i++) {
-                uint id = prim_ids[i];
-                if (id == ignore) continue;
-                __global __read_only Object *object;
-                if (id < ctx->object_count) {
-                    object = &ctx->objects[id];
-                } else {
-                    object = &ctx->lights[id - ctx->object_count].object;
+                ctx->intersection_tests++;
+                uint id = node->one_prim;
+                if (id != ignore) {
+                    float t;
+                    int   side;
+                    bool  hit = intersect_object(origin, dir, &t, &side, &ctx->objects[id]);
+                    if (hit && (!did_hit || t < *hit_t)) {
+                        did_hit    = true;
+                        *hit_t     = t;
+                        *hit_index = id;
+                        *hit_side  = side;
+                    }
                 }
+            } else if (n_prim > 1) {
+                ctx->intersection_tests += n_prim;
+                for (int i = 0; i < n_prim; i++) {
+                    uint id = ctx->prim_ids[node->prim_ids_offset + i];
+                    if (id == ignore) continue;
 
-                switch (object->type) {
-                    case SPHERE:
-                        DEBUG(",Sphere[{");
-                        DEBUG("%v3f", object->sphere.center);
-                        DEBUG("},%f]", object->sphere.radius);
-                        break;
-                    case BOX:
-                        DEBUG(",Cuboid[{");
-                        DEBUG("%v3f", object->box.min);
-                        DEBUG("},{");
-                        DEBUG("%v3f", object->box.max);
-                        DEBUG("}]");
-                        break;
-                }
-
-                float t;
-                int   side;
-                bool  hit = intersect_object(origin, dir, &t, &side, object);
-                if (hit && (!did_hit || t < *hit_t)) {
-                    did_hit    = true;
-                    *hit_t     = t;
-                    *hit_index = id;
-                    *hit_side  = side;
+                    float t;
+                    int   side;
+                    bool  hit = intersect_object(origin, dir, &t, &side, &ctx->objects[id]);
+                    if (hit && (!did_hit || t < *hit_t)) {
+                        did_hit    = true;
+                        *hit_t     = t;
+                        *hit_index = id;
+                        *hit_side  = side;
+                    }
                 }
             }
-
-            DEBUG("}]");
 
             if (task_id > 0) {
                 task_id--;
@@ -464,9 +433,7 @@ intersect(float3 origin, float3 dir, int ignore, Context *ctx, HitInfo *out_info
     bool did_hit = trace_kd(origin, dir, ignore, ctx, &t, &index, &side);
 
     if (did_hit) {
-        __global Object *object = index < ctx->object_count
-                                      ? &ctx->objects[index]
-                                      : &ctx->lights[index - ctx->object_count].object;
+        __global Object *object = &ctx->objects[index];
 
         out_info->dist         = t;
         out_info->object_index = index;
@@ -494,77 +461,6 @@ intersect(float3 origin, float3 dir, int ignore, Context *ctx, HitInfo *out_info
     }
     return false;
 }
-
-/*
-bool
-intersect(float3 pos, float3 dir, HitInfo *info, int ignore, Context *ctx) {
-    bool  did_hit = false;
-    float min_t;
-    int   hit_index;
-    int   hit_side;
-
-    for (int i = 0; i < ctx->object_count; i++) {
-        if (i == ignore) continue; // Don't re-test the surface we're reflecting off of
-
-        float t;
-        bool  hit;
-        int   side;
-
-        hit = intersect_object(pos, dir, &t, &side, &ctx->objects[i]);
-
-        if (hit && (!did_hit || t < min_t)) {
-            did_hit   = true;
-            min_t     = t;
-            hit_index = i;
-            hit_side  = side;
-        }
-    }
-    for (int i = 0; i < ctx->light_count; i++) {
-        if (i == ignore - ctx->object_count) continue;
-
-        float t;
-        bool  hit;
-        int   side;
-
-        hit = intersect_object(pos, dir, &t, &side, &ctx->lights[i].object);
-
-        if (hit && (!did_hit || t < min_t)) {
-            did_hit   = true;
-            min_t     = t;
-            hit_index = ctx->object_count + i;
-            hit_side  = side;
-        }
-    }
-
-    if (!info || !did_hit) return did_hit;
-
-    __global Object *object = hit_index < ctx->object_count
-                                  ? &ctx->objects[hit_index]
-                                  : &ctx->lights[hit_index - ctx->object_count].object;
-
-    info->dist         = min_t;
-    info->object_index = hit_index;
-    info->point        = pos + dir * min_t;
-    info->object       = object;
-
-    switch (object->type) {
-        case SPHERE: info->normal = normalize(info->point - object->sphere.center); break;
-        case BOX:
-            switch (hit_side) {
-                case 0: info->normal = (float3)(-1, 0, 0); break;
-                case 1: info->normal = (float3)(1, 0, 0); break;
-                case 2: info->normal = (float3)(0, -1, 0); break;
-                case 3: info->normal = (float3)(0, 1, 0); break;
-                case 4: info->normal = (float3)(0, 0, -1); break;
-                case 5: info->normal = (float3)(0, 0, 1); break;
-            }
-            info->normal = dot(info->normal, dir) < 0 ? info->normal : -info->normal;
-            break;
-    }
-
-    return true;
-}
-*/
 
 int
 occlusion_check(float3 origin, float3 dir, int ignore, Context *ctx) {
@@ -653,10 +549,11 @@ typedef struct Hit {
 
 float3
 sample_light(float3 origin, float3 normal, int light_index, int ignore_index, Context *ctx) {
+    // https://www.pbr-book.org/3ed-2018/Light_Transport_I_Surface_Reflection/Sampling_Light_Sources#x2-SamplingSpheres
     float3 Lo = 0;
-    float3 L  = ctx->lights[light_index].emission * ctx->lights[light_index].object.albedo;
-    float3 c  = ctx->lights[light_index].object.sphere.center;
-    float  r  = ctx->lights[light_index].object.sphere.radius;
+    float3 L  = ctx->objects[light_index].emission * ctx->objects[light_index].albedo;
+    float3 c  = ctx->objects[light_index].sphere.center;
+    float  r  = ctx->objects[light_index].sphere.radius;
 
     float3 w                = c - origin;
     float  distanceToCenter = length(w);
@@ -688,7 +585,8 @@ sample_light(float3 origin, float3 normal, int light_index, int ignore_index, Co
     float dotNL = dot(nwp, normal);
     if (dotNL > 0) {
         HitInfo light_hit;
-        if (occlusion_check(origin, nwp, ignore_index, ctx) == light_index + ctx->object_count) {
+        // Check if any other objects are occluding the light
+        if (occlusion_check(origin, nwp, ignore_index, ctx) == light_index) {
             float pdf_xp = 1.0f / (2 * M_PI * (1.0f - q));
             Lo += dotNL * (1.0f / pdf_xp) * L / M_PI;
         }
@@ -701,44 +599,33 @@ trace_ray(float3 origin, float3 dir, int ignore_index, bool specular, int depth,
     float3 ret        = 0;
     float3 throughput = 1;
 
-    float hue;
-    if (ctx->debug) hue = tinymt64_double01(&ctx->rand);
-
     while (true) {
         HitInfo hit;
-        // if (!intersect(origin, dir, &hit, ignore_index, ctx)) {
         if (!intersect(origin, dir, ignore_index, ctx, &hit)) {
-            DEBUG(",Graphics3D[{Hue[%f],HalfLine[{", hue);
-            DEBUG("%v3f", origin);
-            DEBUG("},{");
-            DEBUG("%v3f", dir);
-            DEBUG("}]}]");
-            float3 ambient = 0;
-            return ret + ambient * throughput; // Ambient
+            // If the ray goes off to infinity without hitting anything, return the accumulated
+            // emission plus any contribution from the ambient lighting.
+            float3 ambient = 0; // Set this to the desired ambient lighting color, or black for no
+                                // ambient lighting.
+            return ret + ambient * throughput;
         }
-        return 0;
 
-        DEBUG(",Graphics3D[{Hue[%f],Line[{{", hue);
-        DEBUG("%v3f", origin);
-        DEBUG("},{");
-        DEBUG("%v3f", hit.point);
-        DEBUG("}}]}]");
+        float3 hit_color     = hit.object->albedo;
+        bool   did_hit_light = any(hit.object->emission > 0);
 
-        float3 hit_color = hit.object->albedo;
-
-        if (specular && hit.object_index >= ctx->object_count) {
+        if (specular && did_hit_light) {
             // Normally, the main light path ignores direct emission contribution so as not to
             // double-count when lights are explicitly sampled. If, however, we are on the first ray
             // from the camera OR if we are in a specular reflection, the emission needs to be
             // included. Otherwise, lights will look dark when viewed directly or through a specular
             // reflection.
-            float3 hit_emission =
-                ctx->lights[hit.object_index - ctx->object_count].emission * hit_color;
+            // TODO: this should probably include refractive paths as well
+            float3 hit_emission = hit.object->emission * hit_color;
             ret += hit_emission * throughput;
         }
 
         float p = max(max(throughput.x, throughput.y), throughput.z);
         if (depth <= 0 || tinymt64_double01(&ctx->rand) > p) {
+            // Russian roulette
             break;
         }
         throughput /= p;
@@ -776,14 +663,16 @@ trace_ray(float3 origin, float3 dir, int ignore_index, bool specular, int depth,
             ray_prob = max(ray_prob, 0.001f); // TODO is this necessary?
         }
 
-        bool hit_light   = hit.object_index >= ctx->object_count;
-        int  light_count = hit_light ? ctx->light_count - 1 : ctx->light_count;
+        // If the ray hit a light source directly, exclude it from the list of lights to sample
+        // explicitly.
+        int light_count = did_hit_light ? ctx->light_count - 1 : ctx->light_count;
         if (hit_type == DIFFUSE && light_count) {
-            int light_index = tinymt64_uint64(&ctx->rand) % light_count;
-            if (hit_light && light_index >= (hit.object_index - ctx->object_count)) {
-                light_index++;
+            int light_offset = tinymt64_uint64(&ctx->rand) % light_count;
+            int light_index  = ctx->lights[light_offset].index;
+            if (did_hit_light && light_index == hit.object_index) {
+                light_offset++;
+                light_index = ctx->lights[light_offset].index;
             }
-            // for (int light_index = 0; light_index < ctx->light_count; light_index++) {
             float3 light_sample =
                 sample_light(hit.point, hit.normal, light_index, hit.object_index, ctx) *
                 light_count;
@@ -799,7 +688,7 @@ trace_ray(float3 origin, float3 dir, int ignore_index, bool specular, int depth,
         switch (hit_type) {
             case DIFFUSE: dir = diffuse_dir; break;
             case REFLECT: dir -= 2 * dot(dir, hit.normal) * hit.normal; break;
-            case REFRACT: return 0; // TODO
+            case REFRACT: return 0; // TODO: implement refraction
         }
 
         origin       = hit.point;
@@ -829,63 +718,6 @@ my_kernel(
     int2 coord = (int2)(get_global_id(0), get_global_id(1));
     int2 res   = get_image_dim(output);
 
-    bool debug = all(coord == res / 2);
-    //    debug         = &is_debug;
-
-    /*
-    if (is_debug) {
-        printf("Show[");
-        for (int i = 0; i < object_count; i++) {
-            if (i) printf(",");
-            printf("Graphics3D[{Opacity[0.5],RGBColor[");
-            printf("%v3f", objects[i].albedo);
-            printf("],Specularity[");
-            printf("%f", objects[i].specular_chance);
-            printf("],");
-            switch (objects[i].type) {
-                case SPHERE:
-                    printf("Sphere[{");
-                    printf("%v3f", objects[i].sphere.center);
-                    printf("},%f", objects[i].sphere.radius);
-                    printf("]");
-                    break;
-                case BOX:
-                    printf("Cuboid[{");
-                    printf("%v3f", objects[i].box.min);
-                    printf("},{");
-                    printf("%v3f", objects[i].box.max);
-                    printf("}]");
-                    break;
-            }
-            printf("}]");
-        }
-        for (int i = 0; i < light_count; i++) {
-            if (i || object_count) printf(",");
-            printf("Graphics3D[{Glow[RGBColor[");
-            printf("%v3f", lights[i].object.albedo * lights[i].emission);
-            printf("]],Specularity[");
-            printf("%f", lights[i].object.specular_chance);
-            printf("],");
-            switch (lights[i].object.type) {
-                case SPHERE:
-                    printf("Sphere[{");
-                    printf("%v3f", lights[i].object.sphere.center);
-                    printf("},%f", lights[i].object.sphere.radius);
-                    printf("]");
-                    break;
-                case BOX:
-                    printf("Cuboid[{");
-                    printf("%v3f", lights[i].object.box.min);
-                    printf("},{");
-                    printf("%v3f", lights[i].object.box.max);
-                    printf("}]");
-                    break;
-            }
-            printf("}]");
-        }
-    }
-     */
-
     Context ctx = {
         objects,
         object_count,
@@ -896,7 +728,6 @@ my_kernel(
         nodes,
         prim_ids,
         {0},
-        debug,
         0,
     };
 
@@ -907,47 +738,32 @@ my_kernel(
     do {
         float3 origin, dir;
         {
+            // Offset the sample point randomly within the area of its pixel, to create antialiasing
             float2 sample = (float2){
                 (float)coord.x + tinymt64_double01(&ctx.rand),
                 (float)coord.y + tinymt64_double01(&ctx.rand),
             };
+            // Scale sample point from [0, resolution) to [-1, 1)
             float2 rat = 2 * (sample / convert_float2(res)) - 1;
+            // Transform the sample point on the camera's far clip plane into world space
             float3 fcp = mul4x4(camera, (float3)(rat, 1.0f));
 
             origin = (float3){camera[0].z, camera[1].z, camera[2].z} / camera[3].z;
             dir    = normalize((fcp - origin).xyz);
         }
 
-        float3 new_color = 0;
+        float3 sample_color = 0;
         {
             int  ignore_index      = -1;
             bool specular          = true;
-            ctx.intersection_tests = 0;
-            new_color   = trace_ray(origin, dir, ignore_index, specular, MAX_DEPTH, &ctx);
-            new_color.x = ctx.intersection_tests / 25.5;
+            ctx.intersection_tests = 0; // Useful for profiling kd-tree intersections
+            sample_color = trace_ray(origin, dir, ignore_index, specular, MAX_DEPTH, &ctx);
         }
 
-        /*
-        if (is_debug) {
-            printf(",Graphics3D[{Hue[%f],Line[{{", tinymt64_double01(&ctx.rand));
-            printf("%v3f", origin);
-            printf("}");
-            for (int i = 0; i <= *hit_depth; i++) {
-                printf(",{");
-                printf("%v3f", points[i]);
-                printf("}");
-            }
-            printf("}]}]");
-        }
-         */
-
-        color += new_color;
+        color += sample_color;
         samples++;
     } while (samples < input);
 
     color /= samples;
-    if (ctx.debug) {
-        color = (float3){1, 0, 0};
-    }
     write_imagef(output, coord, (float4)(color, 1.0f));
 }
